@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <map>
+#include <list>
 
 #define WLSERVER_BUTTON_COUNT 4
 #define WLSERVER_TOUCH_COUNT 11 // Ten fingers + nose ought to be enough for anyone
@@ -21,6 +22,12 @@ struct ResListEntry_t {
 };
 
 struct wlserver_content_override;
+
+struct wlserver_association
+{
+	uint32_t window_id;
+	struct wlserver_wl_surface_info *surface_info;
+};
 
 class gamescope_xwayland_server_t
 {
@@ -52,6 +59,12 @@ public:
 
 	void update_output_info();
 
+	void register_x11_surface( struct wlserver_x11_surface_info* surf );
+	void unregister_x11_surface( struct wlserver_x11_surface_info* surf );
+
+	void resolve_unmatched_surface(wlserver_association *association);
+	void toss_pending_associations( wlserver_wl_surface_info* surf_info );
+
 private:
 	struct wlr_xwayland_server *xwayland_server = NULL;
 	struct wl_listener xwayland_ready_listener = { .notify = xwayland_ready_callback };
@@ -65,6 +78,9 @@ private:
 
 	std::mutex wayland_commit_lock;
 	std::vector<ResListEntry_t> wayland_commit_queue;
+
+	std::list<struct wlserver_x11_surface_info*> unmatched_x11_surfaces;
+	std::list<struct wlserver_association> pending_associations;
 };
 
 struct wlserver_t {

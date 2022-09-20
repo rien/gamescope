@@ -37,6 +37,7 @@ extern "C" {
 #include "gamescope-xwayland-protocol.h"
 #include "gamescope-pipewire-protocol.h"
 #include "gamescope-tearing-control-unstable-v1-protocol.h"
+#include "xwayland-surface-association-v1-protocol.h"
 
 #include "wlserver.hpp"
 #include "drm.hpp"
@@ -366,8 +367,23 @@ static wlserver_wl_surface_info *get_wl_surface_info(struct wlr_surface *wlr_sur
 static void handle_wl_surface_destroy( struct wl_listener *l, void *data )
 {
 	wlserver_wl_surface_info *surf = wl_container_of( l, surf, destroy );
+	
 	if (surf->x11_surface)
 		surf->x11_surface->wlr = nullptr;
+	else
+	{
+		struct wl_client *client = wl_resource_get_client(surf->wlr->resource);
+
+		gamescope_xwayland_server_t *server = NULL;
+		for (size_t i = 0; (server = wlserver_get_xwayland_server(i)); i++)
+		{
+			if (server->get_client() == client)
+			{
+				server->toss_pending_associations( surf );
+				break;
+			}
+		}
+	}
 
 	if ( surf->wlr == wlserver.mouse_focus_surface )
 		wlserver.mouse_focus_surface = nullptr;
@@ -563,6 +579,69 @@ static void create_gamescope_tearing( void )
 	wl_global_create( wlserver.display, &gamescope_tearing_control_v1_interface, version, NULL, gamescope_tearing_bind );
 }
 
+
+
+static void surface_association_associate( struct wl_client *client, struct wl_resource *resource, struct wl_resource *surface_resource, uint32_t window )
+{
+	wl_log.infof("New surface association method!");
+
+	wlserver_wl_surface_info *wl_surface_info = (wlserver_wl_surface_info *)wl_resource_get_user_data( resource );
+
+	gamescope_xwayland_server_t *server = NULL;
+	for (size_t i = 0; (server = wlserver_get_xwayland_server(i)); i++)
+	{
+		if (server->get_client() == client)
+		{
+			struct wlserver_association association;
+			association.surface_info = wl_surface_info;
+			association.window_id = window;
+
+			server->resolve_unmatched_surface(&association);
+			return;
+		}
+	}
+}
+
+static void surface_association_destroy( struct wl_client *client, struct wl_resource *resource )
+{
+	wl_resource_destroy( resource );
+}
+
+static const struct wp_xwayland_surface_association_v1_interface surface_association_impl {
+	.associate = surface_association_associate,
+	.destroy = surface_association_destroy,
+};
+
+static void surface_association_manager_get_surface_association( struct wl_client *client, struct wl_resource *resource, uint32_t id, struct wl_resource *surface_resource )
+{
+	struct wlr_surface *surface = wlr_surface_from_resource( surface_resource );
+
+	struct wl_resource *surface_association_resource
+		= wl_resource_create( client, &wp_xwayland_surface_association_v1_interface, wl_resource_get_version( resource ), id );
+	wl_resource_set_implementation( surface_association_resource, &surface_association_impl, get_wl_surface_info(surface), NULL );
+}
+
+static void surface_association_manager_destroy( struct wl_client *client, struct wl_resource *resource )
+{
+	wl_resource_destroy( resource );
+}
+
+static const struct wp_xwayland_surface_association_manager_v1_interface surface_association_manager_impl = {
+	.destroy = surface_association_manager_destroy,
+	.get_surface_association = surface_association_manager_get_surface_association,
+};
+
+static void surface_association_bind( struct wl_client *client, void *data, uint32_t version, uint32_t id )
+{
+	struct wl_resource *resource = wl_resource_create( client, &wp_xwayland_surface_association_manager_v1_interface, version, id );
+	wl_resource_set_implementation( resource, &surface_association_manager_impl, NULL, NULL );
+}
+
+static void create_surface_association( void )
+{
+	uint32_t version = 1;
+	wl_global_create( wlserver.display, &wp_xwayland_surface_association_manager_v1_interface, version, NULL, surface_association_bind );
+}
 
 
 
@@ -765,6 +844,64 @@ void gamescope_xwayland_server_t::update_output_info()
 	wlr_output_create_global(output);
 }
 
+void gamescope_xwayland_server_t::register_x11_surface( struct wlserver_x11_surface_info* surf )
+{
+	for (auto it = pending_associations.begin(); it != pending_associations.end(); it++)
+	{
+		if (it->window_id == surf->x11_id)
+		{
+			set_wl_id( surf, wl_resource_get_id(it->surface_info->wlr->resource) );
+			pending_associations.erase(it);
+			return;
+		}
+	}
+
+	unmatched_x11_surfaces.push_back( surf );
+}
+
+void gamescope_xwayland_server_t::unregister_x11_surface( struct wlserver_x11_surface_info* surf )
+{
+	// If we have a wlr surface already, no need to look to nuke from the list.
+	if (surf->wlr)
+		return;
+
+	for (auto it = unmatched_x11_surfaces.begin(); it != unmatched_x11_surfaces.end(); it++)
+	{
+		if ((*it) == surf)
+		{
+			unmatched_x11_surfaces.erase(it);
+			return;
+		}
+	}
+}
+
+void gamescope_xwayland_server_t::resolve_unmatched_surface(wlserver_association *association)
+{
+	for (auto it = unmatched_x11_surfaces.begin(); it != unmatched_x11_surfaces.end(); it++)
+	{
+		if ((*it)->x11_id == association->window_id)
+		{
+			set_wl_id( *it, wl_resource_get_id(association->surface_info->wlr->resource) );
+			unmatched_x11_surfaces.erase(it);
+			return;
+		}
+	}
+
+	pending_associations.push_back(*association);
+}
+
+void gamescope_xwayland_server_t::toss_pending_associations( wlserver_wl_surface_info* surf_info )
+{
+	for (auto it = pending_associations.begin(); it != pending_associations.end(); it++)
+	{
+		if (it->surface_info == surf_info)
+		{
+			pending_associations.erase(it);
+			return;
+		}
+	}
+}
+
 bool wlserver_init( void ) {
 	assert( wlserver.display != nullptr );
 
@@ -819,6 +956,8 @@ bool wlserver_init( void ) {
 #endif
 
 	create_gamescope_tearing();
+	
+	create_surface_association();
 
 	int result = -1;
 	int display_slot = 0;
@@ -1183,6 +1322,10 @@ void wlserver_x11_surface_info_init( struct wlserver_x11_surface_info *surf, gam
 	surf->xwayland_server = server;
 	wl_list_init( &surf->pending_link );
 	wl_list_init( &surf->destroy.link );
+
+	wlserver_lock();
+	server->register_x11_surface(surf);
+	wlserver_unlock();
 }
 
 void gamescope_xwayland_server_t::set_wl_id( struct wlserver_x11_surface_info *surf, uint32_t id )
@@ -1244,6 +1387,8 @@ void wlserver_x11_surface_info_finish( struct wlserver_x11_surface_info *surf )
 	surf->wlr = nullptr;
 	wl_list_remove( &surf->pending_link );
 	wl_list_remove( &surf->destroy.link );
+
+	surf->xwayland_server->unregister_x11_surface( surf );
 }
 
 void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int refresh )

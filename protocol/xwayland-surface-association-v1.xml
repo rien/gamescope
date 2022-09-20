@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="xwayland_surface_association_v1">
+
+  <copyright>
+    Copyright © 2022 Joshua Ashton
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <description summary="Protocol for associating X11 windows to wl_surfaces">
+    This protocol allows an Xwayland server to associate an X11 Window to a wl_surface.
+
+    Before this protocol, this would be done via the Xwayland server providing the
+    wl_surface's resource id via the WL_SURFACE_ID atom on the X window.
+    This was problematic as a race could occur if the wl_surface associated with a WL_SURFACE_ID
+    for a window was destroyed before the update of the atom was processed by the compositor and
+    another surface (or other object) had taken it's id due to recycling.
+
+    This protocol solves that by moving the X11 Window to wl_surface association step to the
+    Wayland side, which means that the association cannot happen out-of-sync with the resource
+    lifetime of the wl_surface.
+  </description>
+
+  <interface name="wp_xwayland_surface_association_manager_v1" version="1">
+    <description summary="context object for surface association manager">
+      The Xwayland surface association manager is a singleton global object that
+      provides the ability to create a wp_xwayland_surface_association_v1 object
+      for a given wl_surface.
+
+      This interface is intended to be bound by the Xwayland server.
+
+      If this interface is bound by an Xwayland server, it must: not
+      set the WL_SURFACE_ID atom on any X11 window.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the surface association manager"/>
+    </request>
+
+    <request name="get_surface_association">
+      <description summary="get a surface association object">
+        Create a surface association interface for a given wl_surface object.
+      </description>
+
+      <arg name="id" type="new_id" interface="wp_xwayland_surface_association_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+  </interface>
+
+  <interface name="wp_xwayland_surface_association_v1" version="1">
+    <description summary="interface for associating Xwayland windows to wl_surfaces">
+      A interface used for associating Xwayland windows to wl_surfaces.
+    </description>
+
+    <request name="associate">
+      <description summary="associates a Xwayland window to a wl_surface">
+        Associates an Xwayland window to a wl_surface.
+
+        The X server associated with the XID `window` is determined by the
+        wl_client making the request.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="window" type="uint" summary="Window XID"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the surface association object">
+        Destroy the surface association manager.
+      </description>
+    </request>
+  </interface>
+</protocol>

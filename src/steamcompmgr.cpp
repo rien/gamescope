@@ -3566,6 +3566,8 @@ handle_wl_surface_id(xwayland_ctx_t *ctx, win *w, uint32_t surfaceID)
 {
 	struct wlr_surface *surface = NULL;
 
+	xwm_log.infof("Using legacy wl surface id");
+
 	wlserver_lock();
 
 	ctx->xwayland_server->set_wl_id( &w->surface, surfaceID );
