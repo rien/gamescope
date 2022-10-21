@@ -1617,8 +1617,8 @@ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
 
 void CVulkanCmdBuffer::copyImage(std::shared_ptr<CVulkanTexture> src, std::shared_ptr<CVulkanTexture> dst)
 {
-	//assert(src->width() == dst->width());
-	//assert(src->height() == dst->height());
+	assert(src->width() == dst->width());
+	assert(src->height() == dst->height());
 	m_textureRefs.emplace(src.get(), src);
 	m_textureRefs.emplace(dst.get(), dst);
 	prepareSrcImage(src.get());
@@ -2334,7 +2334,6 @@ bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t
 		return false;
 	}
 
-
 	m_bInitialized = true;
 
 	return true;
@@ -2576,7 +2575,7 @@ bool vulkan_make_swapchain( VulkanOutput_t *pOutput )
 			.height = g_nOutputHeight,
 		},
 		.imageArrayLayers = 1,
-		.imageUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+		.imageUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
 		.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		.preTransform = pOutput->surfaceCaps.currentTransform,
 		.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
@@ -2882,6 +2881,8 @@ std::shared_ptr<CVulkanTexture> vulkan_acquire_screenshot_texture(uint32_t width
 			if (exportable) {
 				screenshotImageFlags.bExportable = true;
 				screenshotImageFlags.bLinear = true; // TODO: support multi-planar DMA-BUF export via PipeWire
+				screenshotImageFlags.bStorage = true;
+				screenshotImageFlags.bSampled = true;
 			}
 
 			bool bSuccess = pScreenshotImage->BInit( width, height, VulkanFormatToDRM(g_output.outputFormat), screenshotImageFlags );
@@ -2916,6 +2917,14 @@ struct BlitPushData_t
 		}
 		borderMask = frameInfo->borderMask();
 		frameId = s_frameId++;
+	}
+
+	explicit BlitPushData_t(float blit_scale) {
+		scale[0] = { blit_scale, blit_scale };
+		offset[0] = { 0.0f, 0.0f };
+		opacity[0] = 1.0f;
+		borderMask = 0;
+		frameId = s_frameId;
 	}
 };
 
@@ -3142,14 +3151,36 @@ bool vulkan_composite( const struct FrameInfo_t *frameInfo, std::shared_ptr<CVul
 		cmdBuffer->bindTarget(compositeImage);
 		cmdBuffer->pushConstants<BlitPushData_t>(frameInfo);
 
-		int pixelsPerGroup = 8;
+		const int pixelsPerGroup = 8;
 
 		cmdBuffer->dispatch(div_roundup(currentOutputWidth, pixelsPerGroup), div_roundup(currentOutputHeight, pixelsPerGroup));
 	}
 
 	if ( pScreenshotTexture != nullptr )
 	{
-		cmdBuffer->copyImage(compositeImage, pScreenshotTexture);
+		if (compositeImage->width() == pScreenshotTexture->width() &&
+		    compositeImage->height() == pScreenshotTexture->height()) {
+			cmdBuffer->copyImage(compositeImage, pScreenshotTexture);
+		} else {
+			float scale = (float)compositeImage->width() / pScreenshotTexture->width();
+			BlitPushData_t constants( scale );
+
+			cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_BLIT));
+			cmdBuffer->bindTexture(0, compositeImage);
+			cmdBuffer->setTextureSrgb(0, true);
+			cmdBuffer->setSamplerNearest(0, false);
+			cmdBuffer->setSamplerUnnormalized(0, true);
+			for (uint32_t i = 1; i < VKR_SAMPLER_SLOTS; i++)
+			{
+				cmdBuffer->bindTexture(i, nullptr);
+			}
+			cmdBuffer->bindTarget(pScreenshotTexture);
+			cmdBuffer->pushConstants<BlitPushData_t>(constants);
+
+			const int pixelsPerGroup = 8;
+
+			cmdBuffer->dispatch(div_roundup(pScreenshotTexture->width(), pixelsPerGroup), div_roundup(pScreenshotTexture->height(), pixelsPerGroup));
+		}
 	}
 
 	uint64_t sequence = g_device.submit(std::move(cmdBuffer));
