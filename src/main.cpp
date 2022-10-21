@@ -23,6 +23,10 @@
 #include "wlserver.hpp"
 #include "gpuvis_trace_utils.h"
 
+#if HAVE_OPENVR
+#include "vr_session.hpp"
+#endif
+
 #if HAVE_PIPEWIRE
 #include "pipewire.hpp"
 #endif
@@ -60,6 +64,9 @@ const struct option *gamescope_options = (struct option[]){
 	{ "default-touch-mode", required_argument, nullptr, 0 },
 	{ "generate-drm-mode", required_argument, nullptr, 0 },
 	{ "immediate-flips", no_argument, nullptr, 0 },
+#if HAVE_OPENVR
+	{ "openvr", no_argument, nullptr, 0 },
+#endif
 
 	// wlserver options
 	{ "xwayland-count", required_argument, nullptr, 0 },
@@ -121,6 +128,11 @@ const char usage[] =
 	"  --generate-drm-mode            DRM mode generation algorithm (cvt, fixed)\n"
 	"  --immediate-flips              Enable immediate flips, may result in tearing\n"
 	"\n"
+#if HAVE_OPENVR
+	"VR mode options:\n"
+	"  --openvr                       Uses the openvr backend and outputs as an overlay\n"
+	"\n"
+#endif
 	"Debug options:\n"
 	"  --disable-layers               disable libliftoff (hardware planes)\n"
 	"  --debug-layers                 debug libliftoff\n"
@@ -185,6 +197,19 @@ bool BIsNested()
 {
 	return g_bIsNested;
 }
+
+#if HAVE_OPENVR
+bool g_bUseOpenVR = false;
+bool BIsVRSession( void )
+{
+	return g_bUseOpenVR;
+}
+#else
+bool BIsVRSession( void )
+{
+	return false;
+}
+#endif
 
 static bool initOutput(int preferredWidth, int preferredHeight, int preferredRefresh);
 static void steamCompMgrThreadRun(int argc, char **argv);
@@ -405,6 +430,12 @@ int main(int argc, char **argv)
 				} else if (strcmp(opt_name, "immediate-flips") == 0) {
 					g_nAsyncFlipsEnabled = 1;
 				}
+#if HAVE_OPENVR
+				else if (strcmp(opt_name, "openvr") == 0) {
+					g_bUseOpenVR = true;
+					g_bIsNested = true;
+				}
+#endif
 				break;
 			case '?':
 				fprintf( stderr, "See --help for a list of options.\n" );
@@ -479,7 +510,15 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	if ( BIsNested() )
+	if ( BIsVRSession() )
+	{
+		if ( !vr_init() )
+		{
+			fprintf( stderr, "Failed to initialize OpenVR runtime\n" );
+			return 1;
+		}
+	}
+	else if ( BIsNested() )
 	{
 		if ( SDL_Init( SDL_INIT_VIDEO | SDL_INIT_EVENTS ) != 0 )
 		{
@@ -624,7 +663,16 @@ static bool initOutput( int preferredWidth, int preferredHeight, int preferredRe
 		if ( g_nOutputRefresh == 0 )
 			g_nOutputRefresh = 60;
 
-		return sdlwindow_init();
+#if HAVE_OPENVR
+		if ( BIsVRSession() )
+		{
+			return vrsession_init();
+		}
+		else
+#endif
+		{
+			return sdlwindow_init();
+		}
 	}
 	else
 	{

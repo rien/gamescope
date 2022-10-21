@@ -78,6 +78,10 @@
 #include "pipewire.hpp"
 #endif
 
+#if HAVE_OPENVR
+#include "vr_session.hpp"
+#endif
+
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image.h>
@@ -1893,7 +1897,16 @@ paint_all(bool async)
 
 		if ( BIsNested() == true )
 		{
-			vulkan_present_to_window();
+#if HAVE_OPENVR
+			if ( BIsVRSession() )
+			{
+				vulkan_present_to_openvr();
+			}
+			else
+#endif
+			{
+				vulkan_present_to_window();
+			}
 			// Update the time it took us to present.
 			// TODO: Use Vulkan present timing in future.
 			g_uVblankDrawTimeNS = get_time_in_nanos() - g_SteamCompMgrVBlankTime;
@@ -5579,7 +5592,16 @@ steamcompmgr_main(int argc, char **argv)
 		if ( currentOutputWidth != g_nOutputWidth ||
 			 currentOutputHeight != g_nOutputHeight )
 		{
-			if ( BIsNested() == true )
+			if ( steamMode && g_nXWaylandCount > 1 )
+			{
+				g_nNestedHeight = ( g_nNestedWidth * g_nOutputHeight ) / g_nOutputWidth;
+				wlserver_lock();
+				// Update only Steam, the root ctx, with the new output size for now
+				wlserver_set_xwayland_server_mode( 0, g_nOutputWidth, g_nOutputHeight, g_nOutputRefresh );
+				wlserver_unlock();
+			}
+
+			if ( BIsNested() == true && BIsVRSession() == false )
 			{
 				vulkan_remake_swapchain();
 
@@ -5588,15 +5610,6 @@ steamcompmgr_main(int argc, char **argv)
 			}
 			else
 			{
-				if ( steamMode && g_nXWaylandCount > 1 )
-				{
-					g_nNestedHeight = ( g_nNestedWidth * g_nOutputHeight ) / g_nOutputWidth;
-					wlserver_lock();
-					// Update only Steam, the root ctx, with the new output size for now
-					wlserver_set_xwayland_server_mode( 0, g_nOutputWidth, g_nOutputHeight, g_nOutputRefresh );
-					wlserver_unlock();
-				}
-
 				vulkan_remake_output_images();
 			}
 
@@ -5659,6 +5672,11 @@ steamcompmgr_main(int argc, char **argv)
 
 		if ( !bShouldPaint && hasRepaintNonBasePlane && vblank )
 			nIgnoredOverlayRepaints++;
+
+#ifdef HAVE_OPENVR
+		if ( BIsVRSession() && !vrsession_visible() )
+			bShouldPaint = false;
+#endif
 
 		if ( bShouldPaint )
 		{

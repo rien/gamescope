@@ -4,3 +4,6 @@
 [submodule "subprojects/libliftoff"]
 	path = subprojects/libliftoff
 	url = https://gitlab.freedesktop.org/emersion/libliftoff.git
+[submodule "subprojects/openvr"]
+	path = subprojects/openvr
+	url = https://github.com/ValveSoftware/openvr.git

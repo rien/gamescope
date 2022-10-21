@@ -1,1 +1,2 @@
 option('pipewire', type: 'feature', description: 'Screen capture via PipeWire')
+option('openvr', type: 'feature', description: 'SteamVR Integrations')

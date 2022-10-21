@@ -46,6 +46,18 @@ sdl_dep = dependency('SDL2')
 pipewire_dep = dependency('libpipewire-0.3', required: get_option('pipewire'))
 librt_dep = cppc.find_library('rt', required : get_option('pipewire'))
 
+cpu_family = target_machine.cpu_family()
+openvr_path_base = meson.source_root() + '/subprojects/openvr'
+openvr_lib_path_base = openvr_path_base + '/lib'
+if (cpu_family == 'x86_64')
+  openvr_lib_path = openvr_lib_path_base +'/linux64'
+elif (cpu_family == 'x86')
+  openvr_lib_path = openvr_lib_path_base +'/linux32'
+elif (cpu_family == 'aarch64')
+  openvr_lib_path = openvr_lib_path_base +'/linuxarm64'
+endif
+openvr_dep = cppc.find_library('openvr_api', dirs: openvr_lib_path, required : get_option('openvr'))
+
 stb_dep = dependency('stb')
 
 wlroots_dep = dependency(
@@ -111,6 +123,7 @@ liftoff_dep = dependency(
 
 add_project_arguments(
   '-DHAVE_PIPEWIRE=@0@'.format(pipewire_dep.found().to_int()),
+  '-DHAVE_OPENVR=@0@'.format(openvr_dep.found().to_int()),
   language: 'cpp',
 )
 
@@ -134,6 +147,10 @@ if pipewire_dep.found()
   src += 'src/pipewire.cpp'
 endif
 
+if openvr_dep.found()
+  src += 'src/vr_session.cpp'
+endif
+
 subdir('protocol')
 
 executable(
@@ -144,6 +161,7 @@ executable(
     dep_xxf86vm, dep_xres, drm_dep, wayland_server, wayland_protos,
     xkbcommon, thread_dep, sdl_dep, wlroots_dep,
     vulkan_dep, liftoff_dep, dep_xtst, cap_dep, pipewire_dep, librt_dep, stb_dep,
+    openvr_dep,
   ],
   install: true,
 )
