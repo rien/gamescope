@@ -41,6 +41,9 @@
 #include "shaders/ffx_fsr1.h"
 #include "shaders/descriptor_set_constants.h"
 
+constexpr uint32_t k_UniformBlockSize = 256;
+constexpr uint32_t k_UniformBufferSize = 16 * k_UniformBlockSize;
+
 extern "C"
 {
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
@@ -307,6 +310,13 @@ struct TextureState
 	}
 };
 
+struct VulkanUniformBlock
+{
+	void*	 pData; // Already offsetted by offset.
+	VkBuffer buffer;
+	uint32_t offset;
+};
+
 class CVulkanCmdBuffer
 {
 public:
@@ -328,7 +338,7 @@ public:
 	void bindTarget(std::shared_ptr<CVulkanTexture> target);
 	void clearState();
 	template<class PushData, class... Args>
-	void pushConstants(Args&&... args);
+	void setConstants(Args&&... args);
 	void bindPipeline(VkPipeline pipeline);
 	void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1);
 	void copyImage(std::shared_ptr<CVulkanTexture> src, std::shared_ptr<CVulkanTexture> dst);
@@ -343,6 +353,7 @@ private:
 
 	VkCommandBuffer m_cmdBuffer;
 	CVulkanDevice *m_device;
+	VulkanUniformBlock m_uniformBlock = {};
 
 	// Per Use State
 	std::unordered_map<CVulkanTexture *, std::shared_ptr<CVulkanTexture>> m_textureRefs;
@@ -441,6 +452,7 @@ public:
 	void wait(uint64_t sequence);
 	void waitIdle();
 	void garbageCollect();
+	VulkanUniformBlock popUniformData();
 	inline VkDescriptorSet descriptorSet()
 	{
 		VkDescriptorSet ret = m_descriptorSets[m_currentDescriptorSet];
@@ -480,6 +492,7 @@ private:
 	bool createPools();
 	bool createShaders();
 	bool createScratchResources();
+	bool createUniformBuffer();
 	VkPipeline compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, uint32_t radius, ShaderType type, uint32_t blur_layer_count, bool composite_debug);
 	void compileAllPipelines();
 	void resetCmdBuffers(uint64_t sequence);
@@ -519,6 +532,11 @@ private:
 	std::array<VkDescriptorSet, 3> m_descriptorSets;
 	uint32_t m_currentDescriptorSet = 0;
 
+	VkBuffer m_uniformBuffer;
+	VkDeviceMemory m_uniformBufferMemory;
+	void *m_uniformBufferData;
+	uint32_t m_uniformBufferOffset;
+
 	VkBuffer m_uploadBuffer;
 	VkDeviceMemory m_uploadBufferMemory;
 	void *m_uploadBufferData;
@@ -547,6 +565,8 @@ bool CVulkanDevice::BInit()
 	if (!createShaders())
 		return false;
 	if (!createScratchResources())
+		return false;
+	if (!createUniformBuffer())
 		return false;
 
 	m_bInitialized = true;
@@ -941,7 +961,7 @@ bool CVulkanDevice::createLayouts()
 	for (auto& sampler : ycbcrSamplers)
 		sampler = m_ycbcrSampler;
 
-	std::array<VkDescriptorSetLayoutBinding, 3> layoutBindings = {
+	std::array<VkDescriptorSetLayoutBinding, 4> layoutBindings = {
 		VkDescriptorSetLayoutBinding {
 			.binding = 0,
 			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -961,6 +981,12 @@ bool CVulkanDevice::createLayouts()
 			.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
 			.pImmutableSamplers = ycbcrSamplers.data(),
 		},
+		VkDescriptorSetLayoutBinding {
+			.binding = 3,
+			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			.descriptorCount = 1,
+			.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+		},
 	};
 
 	VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo =
@@ -976,19 +1002,11 @@ bool CVulkanDevice::createLayouts()
 		vk_errorf( res, "vkCreateDescriptorSetLayout failed" );
 		return false;
 	}
-
-	VkPushConstantRange pushConstantRange = {
-		.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-		.offset = 0,
-		.size = 128,
-	};
 	
 	VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		.setLayoutCount = 1,
 		.pSetLayouts = &m_descriptorSetLayout,
-		.pushConstantRangeCount = 1,
-		.pPushConstantRanges = &pushConstantRange,
 	};
 	
 	res = vk.CreatePipelineLayout(device(), &pipelineLayoutCreateInfo, nullptr, &m_pipelineLayout);
@@ -1016,7 +1034,7 @@ bool CVulkanDevice::createPools()
 		return false;
 	}
 
-	VkDescriptorPoolSize poolSizes[2] {
+	VkDescriptorPoolSize poolSizes[3] {
 		{
 			VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
 			uint32_t(m_descriptorSets.size()) * 1,
@@ -1025,6 +1043,10 @@ bool CVulkanDevice::createPools()
 			VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 			uint32_t(m_descriptorSets.size()) * 2 * VKR_SAMPLER_SLOTS,
 		},
+		{
+			VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+			uint32_t(m_descriptorSets.size()) * 1,
+		}
 	};
 	
 	VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {
@@ -1166,6 +1188,53 @@ bool CVulkanDevice::createScratchResources()
 		vk_errorf( res, "vkCreateSemaphore failed" );
 		return false;
 	}
+
+	return true;
+}
+
+bool CVulkanDevice::createUniformBuffer()
+{
+	VkBufferCreateInfo bufferCreateInfo = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.size  = k_UniformBufferSize,
+		.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+	};
+
+	VkResult res = vk.CreateBuffer( device(), &bufferCreateInfo, nullptr, &m_uniformBuffer );
+	if ( res != VK_SUCCESS )
+	{
+		vk_errorf( res, "vkCreateBuffer failed" );
+		return false;
+	}
+	
+	VkMemoryRequirements memRequirements;
+	vk.GetBufferMemoryRequirements(device(), m_uniformBuffer, &memRequirements);
+	
+	uint32_t memTypeIndex = findMemoryType(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT|VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, memRequirements.memoryTypeBits );
+	if ( memTypeIndex == ~0u )
+	{
+		vk_log.errorf( "findMemoryType failed" );
+		return false;
+	}
+	
+	VkMemoryAllocateInfo allocInfo = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.allocationSize = memRequirements.size,
+		.memoryTypeIndex = memTypeIndex,
+	};
+	
+	vk.AllocateMemory( device(), &allocInfo, nullptr, &m_uniformBufferMemory);
+	
+	vk.BindBufferMemory( device(), m_uniformBuffer, m_uniformBufferMemory, 0 );
+
+	res = vk.MapMemory( device(), m_uniformBufferMemory, 0, VK_WHOLE_SIZE, 0, (void**)&m_uniformBufferData );
+	if ( res != VK_SUCCESS )
+	{
+		vk_errorf( res, "vkMapMemory failed" );
+		return false;
+	}
+
+	m_uniformBufferOffset = 0;
 
 	return true;
 }
@@ -1426,6 +1495,18 @@ void CVulkanDevice::garbageCollect( void )
 	resetCmdBuffers(currentSeqNo);
 }
 
+VulkanUniformBlock CVulkanDevice::popUniformData()
+{
+	VulkanUniformBlock block = {
+		.pData  = ((char *)m_uniformBufferData) + m_uniformBufferOffset,
+		.buffer = m_uniformBuffer,
+		.offset = m_uniformBufferOffset,
+	};
+	// Advance the offset along for the next pop.
+	m_uniformBufferOffset = (m_uniformBufferOffset + k_UniformBlockSize) % k_UniformBufferSize;
+	return block;
+}
+
 void CVulkanDevice::wait(uint64_t sequence)
 {
 	VkSemaphoreWaitInfo waitInfo = {
@@ -1543,11 +1624,12 @@ void CVulkanCmdBuffer::clearState()
 }
 
 template<class PushData, class... Args>
-void CVulkanCmdBuffer::pushConstants(Args&&... args)
+void CVulkanCmdBuffer::setConstants(Args&&... args)
 {
-	static_assert(sizeof(PushData) <= 128, "Only 128 bytes push constants.");
+	static_assert(sizeof(PushData) <= k_UniformBlockSize, "Only k_UniformBlockSize bytes of data here.");
+	m_uniformBlock = m_device->popUniformData();
 	PushData data(std::forward<Args>(args)...);
-	m_device->vk.CmdPushConstants(m_cmdBuffer, m_device->pipelineLayout(), VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(data), &data);
+	memcpy(m_uniformBlock.pData, &data, sizeof(data));
 }
 
 void CVulkanCmdBuffer::bindPipeline(VkPipeline pipeline)
@@ -1568,12 +1650,17 @@ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
 
 	VkDescriptorSet descriptorSet = m_device->descriptorSet();
 
-	std::array<VkWriteDescriptorSet, 3> writeDescriptorSets;
+	std::array<VkWriteDescriptorSet, 4> writeDescriptorSets;
 	std::array<VkDescriptorImageInfo, VKR_SAMPLER_SLOTS> imageDescriptors = {};
 	std::array<VkDescriptorImageInfo, VKR_SAMPLER_SLOTS> ycbcrImageDescriptors = {};
 	VkDescriptorImageInfo targetDescriptor = {
 		.imageView = m_target->srgbView(),
 		.imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+	};
+	VkDescriptorBufferInfo bufferDescriptor = {
+		.buffer = m_uniformBlock.buffer,
+		.offset = m_uniformBlock.offset,
+		.range  = k_UniformBlockSize,
 	};
 
 	writeDescriptorSets[0] = {
@@ -1604,6 +1691,16 @@ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
 		.descriptorCount = ycbcrImageDescriptors.size(),
 		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 		.pImageInfo = ycbcrImageDescriptors.data(),
+	};
+
+	writeDescriptorSets[3] = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = descriptorSet,
+		.dstBinding = 3,
+		.dstArrayElement = 0,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.pBufferInfo = &bufferDescriptor,
 	};
 
 	for (uint32_t i = 0; i < VKR_SAMPLER_SLOTS; i++)
@@ -3106,7 +3203,7 @@ bool vulkan_composite( const struct FrameInfo_t *frameInfo, std::shared_ptr<CVul
 		cmdBuffer->setTextureSrgb(0, true);
 		cmdBuffer->setSamplerUnnormalized(0, false);
 		cmdBuffer->setSamplerNearest(0, false);
-		cmdBuffer->pushConstants<EasuPushData_t>(inputX, inputY, tempX, tempY);
+		cmdBuffer->setConstants<EasuPushData_t>(inputX, inputY, tempX, tempY);
 
 		int pixelsPerGroup = 16;
 
@@ -3119,7 +3216,7 @@ bool vulkan_composite( const struct FrameInfo_t *frameInfo, std::shared_ptr<CVul
 		cmdBuffer->setSamplerUnnormalized(0, false);
 		cmdBuffer->setSamplerNearest(0, false);
 		cmdBuffer->bindTarget(compositeImage);
-		cmdBuffer->pushConstants<RcasPushData_t>(frameInfo, g_upscalerSharpness / 10.0f);
+		cmdBuffer->setConstants<RcasPushData_t>(frameInfo, g_upscalerSharpness / 10.0f);
 
 		cmdBuffer->dispatch(div_roundup(currentOutputWidth, pixelsPerGroup), div_roundup(currentOutputHeight, pixelsPerGroup));
 	}
@@ -3147,7 +3244,7 @@ bool vulkan_composite( const struct FrameInfo_t *frameInfo, std::shared_ptr<CVul
 		cmdBuffer->bindTexture(VKR_NIS_COEF_USM_SLOT, g_output.nisUsmImage);
 		cmdBuffer->setSamplerUnnormalized(VKR_NIS_COEF_USM_SLOT, false);
 		cmdBuffer->setSamplerNearest(VKR_NIS_COEF_USM_SLOT, false);
-		cmdBuffer->pushConstants<NisPushData_t>(inputX, inputY, tempX, tempY, nisSharpness);
+		cmdBuffer->setConstants<NisPushData_t>(inputX, inputY, tempX, tempY, nisSharpness);
 
 		int pixelsPerGroupX = 32;
 		int pixelsPerGroupY = 24;
@@ -3162,7 +3259,7 @@ bool vulkan_composite( const struct FrameInfo_t *frameInfo, std::shared_ptr<CVul
 		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask()));
 		bind_all_layers(cmdBuffer.get(), &nisFrameInfo);
 		cmdBuffer->bindTarget(compositeImage);
-		cmdBuffer->pushConstants<BlitPushData_t>(&nisFrameInfo);
+		cmdBuffer->setConstants<BlitPushData_t>(&nisFrameInfo);
 
 		int pixelsPerGroup = 8;
 
@@ -3188,7 +3285,7 @@ bool vulkan_composite( const struct FrameInfo_t *frameInfo, std::shared_ptr<CVul
 			cmdBuffer->setSamplerUnnormalized(i, true);
 			cmdBuffer->setSamplerNearest(i, false);
 		}
-		cmdBuffer->pushConstants<BlitPushData_t>(frameInfo);
+		cmdBuffer->setConstants<BlitPushData_t>(frameInfo);
 
 		int pixelsPerGroup = 8;
 
@@ -3210,7 +3307,7 @@ bool vulkan_composite( const struct FrameInfo_t *frameInfo, std::shared_ptr<CVul
 		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask()));
 		bind_all_layers(cmdBuffer.get(), frameInfo);
 		cmdBuffer->bindTarget(compositeImage);
-		cmdBuffer->pushConstants<BlitPushData_t>(frameInfo);
+		cmdBuffer->setConstants<BlitPushData_t>(frameInfo);
 
 		int pixelsPerGroup = 8;
 
