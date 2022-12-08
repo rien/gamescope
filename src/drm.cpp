@@ -854,9 +854,7 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh, bool wants_
 
 	drm->connector_priorities = parse_connector_priorities( g_sOutputName );
 
-	if (!setup_best_connector(drm, false)) {
-		return false;
-	}
+	setup_best_connector(drm, false);
 
 	// Fetch formats which can be scanned out
 	for (size_t i = 0; i < drm->planes.size(); i++) {
