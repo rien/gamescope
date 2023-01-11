@@ -77,6 +77,7 @@
 #include "vblankmanager.hpp"
 #include "sdlwindow.hpp"
 #include "log.hpp"
+#include "defer.hpp"
 
 #if HAVE_PIPEWIRE
 #include "pipewire.hpp"
@@ -5331,6 +5332,52 @@ load_mouse_cursor( MouseCursor *cursor, const char *path, int hx, int hy )
 	return cursor->setCursorImage((char *)data, w, h, hx, hy);
 }
 
+static bool
+load_host_cursor( MouseCursor *cursor )
+{
+	Display *display = XOpenDisplay( nullptr );
+	if ( !display )
+		return false;
+	defer( XCloseDisplay( display ) );
+
+	int xfixes_event, xfixes_error;
+	if (!XFixesQueryExtension(display, &xfixes_event, &xfixes_error))
+	{
+		xwm_log.errorf("No XFixes extension on current compositor");
+		return false;
+	}
+
+	while (XPending(display))
+	{
+		XEvent ev;
+		int ret = XNextEvent(display, &ev);
+		if (ev.type == xfixes_event + XFixesCursorNotify)
+		{
+			fprintf(stderr, "asdasdasd\n");
+		}
+		XFlush(display);
+	}
+
+	XFixesCursorImage *image = XFixesGetCursorImage( display );
+	if ( !image )
+		return false;
+	defer( XFree( image ) );
+
+	// image->pixels is `unsigned long*` :/
+	// Thanks X11.
+	std::vector<uint32_t> cursorData;
+	for (uint32_t y = 0; y < image->height; y++)
+	{
+		for (uint32_t x = 0; x < image->width; x++)
+		{
+			cursorData.push_back((uint32_t)image->pixels[image->height * y + x]);
+		}
+	}
+
+	cursor->setCursorImage((char *)cursorData.data(), image->width, image->height, image->xhot, image->yhot);
+	return true;
+}
+
 enum steamcompmgr_event_type {
 	EVENT_VBLANK,
 	EVENT_NUDGE,
@@ -5593,6 +5640,11 @@ void init_xwayland_ctx(gamescope_xwayland_server_t *xwayland_server)
 	{
 		if (!load_mouse_cursor(ctx->cursor.get(), g_customCursorPath, g_customCursorHotspotX, g_customCursorHotspotY))
 			xwm_log.errorf("Failed to load mouse cursor: %s", g_customCursorPath);
+	}
+	else
+	{
+		if (!load_host_cursor(ctx->cursor.get()))
+			xwm_log.errorf("Failed to load host cursor\n");
 	}
 }
 
