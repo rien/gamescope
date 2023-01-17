@@ -40,6 +40,20 @@ extern bool g_bHDRForceWideGammutForSDR;
 
 extern EStreamColorspace g_ForcedNV12ColorSpace;
 
+struct CursorBarrierInfo
+{
+	int x1 = 0;
+	int y1 = 0;
+	int x2 = 0;
+	int y2 = 0;
+};
+
+struct CursorBarrier
+{
+	PointerBarrier obj = None;
+	CursorBarrierInfo info = {};
+};
+
 class MouseCursor
 {
 public:
@@ -49,7 +63,6 @@ public:
 	int y() const;
 
 	void move(int x, int y);
-	void updatePosition();
 	void constrainPosition();
 	void resetPosition();
 
@@ -77,8 +90,6 @@ private:
 	void warp(int x, int y);
 	void checkSuspension();
 
-	void queryGlobalPosition(int &x, int &y);
-	void queryPositions(int &rootX, int &rootY, int &winX, int &winY);
 	void queryButtonMask(unsigned int &mask);
 
 	bool getTexture();
@@ -95,7 +106,7 @@ private:
 	unsigned int m_lastMovedTime = 0;
 	bool m_hideForMovement;
 
-	PointerBarrier m_scaledFocusBarriers[4] = { None };
+	CursorBarrier m_barriers[4] = {};
 
 	xwayland_ctx_t *m_ctx;
 

@@ -1008,22 +1008,6 @@ MouseCursor::MouseCursor(xwayland_ctx_t *ctx)
 	updateCursorFeedback( true );
 }
 
-void MouseCursor::queryPositions(int &rootX, int &rootY, int &winX, int &winY)
-{
-	Window window, child;
-	unsigned int mask;
-
-	XQueryPointer(m_ctx->dpy, DefaultRootWindow(m_ctx->dpy), &window, &child,
-				  &rootX, &rootY, &winX, &winY, &mask);
-
-}
-
-void MouseCursor::queryGlobalPosition(int &x, int &y)
-{
-	int winX, winY;
-	queryPositions(x, y, winX, winY);
-}
-
 void MouseCursor::queryButtonMask(unsigned int &mask)
 {
 	Window window, child;
@@ -1213,17 +1197,23 @@ void MouseCursor::constrainPosition()
 	if (window == override)
 		window = m_ctx->focus.focusWindow;
 
-	// If we had barriers before, get rid of them.
-	for (i = 0; i < 4; i++) {
-		if (m_scaledFocusBarriers[i] != None) {
-			XFixesDestroyPointerBarrier(m_ctx->dpy, m_scaledFocusBarriers[i]);
-			m_scaledFocusBarriers[i] = None;
-		}
-	}
+	if (!window)
+		return;
 
-	auto barricade = [this](int x1, int y1, int x2, int y2) {
-		return XFixesCreatePointerBarrier(m_ctx->dpy, DefaultRootWindow(m_ctx->dpy),
-										  x1, y1, x2, y2, 0, 0, NULL);
+	auto barricade = [this](CursorBarrier& barrier, const CursorBarrierInfo& info) {
+		if (barrier.info.x1 == info.x1 && barrier.info.x2 == info.x2 &&
+			barrier.info.y1 == info.y1 && barrier.info.y2 == info.y2)
+			return;
+
+		if (barrier.obj != None)
+		{
+			XFixesDestroyPointerBarrier(m_ctx->dpy, barrier.obj);
+			barrier.obj = None;
+		}
+
+		barrier.obj = XFixesCreatePointerBarrier(m_ctx->dpy, DefaultRootWindow(m_ctx->dpy),
+										  info.x1, info.y1, info.x2, info.y2, 0, 0, NULL);
+		barrier.info = info;
 	};
 
 	int x1 = window->a.x;
@@ -1242,14 +1232,13 @@ void MouseCursor::constrainPosition()
 	}
 
 	// Constrain it to the window; careful, the corners will leak due to a known X server bug.
-	m_scaledFocusBarriers[0] = barricade(0, y1, m_ctx->root_width, y1);
-	m_scaledFocusBarriers[1] = barricade(x2, 0, x2, m_ctx->root_height);
-	m_scaledFocusBarriers[2] = barricade(m_ctx->root_width, y2, 0, y2);
-	m_scaledFocusBarriers[3] = barricade(x1, m_ctx->root_height, x1, 0);
+	barricade(m_barriers[0], CursorBarrierInfo{ 0, y1, m_ctx->root_width, y1 });
+	barricade(m_barriers[1], CursorBarrierInfo{ x2, 0, x2, m_ctx->root_height });
+	barricade(m_barriers[2], CursorBarrierInfo{ m_ctx->root_width, y2, 0, y2 });
+	barricade(m_barriers[3], CursorBarrierInfo{ x1, m_ctx->root_height, x1, 0 });
 
 	// Make sure the cursor is somewhere in our jail
-	int rootX, rootY;
-	queryGlobalPosition(rootX, rootY);
+	int rootX = m_x, rootY = m_y;
 
 	if ( rootX >= x2 || rootY >= y2 || rootX < x1 || rootY < y1 ) {
 		if ( window_wants_no_focus_when_mouse_hidden( window ) && m_hideForMovement )
@@ -1303,14 +1292,6 @@ void MouseCursor::move(int x, int y)
 	}
 	m_hideForMovement = false;
 	updateCursorFeedback();
-}
-
-void MouseCursor::updatePosition()
-{
-	int x,y;
-	queryGlobalPosition(x, y);
-	move(x, y);
-	checkSuspension();
 }
 
 int MouseCursor::x() const
@@ -1413,9 +1394,7 @@ void MouseCursor::paint(win *window, win *fit, struct FrameInfo_t *frameInfo)
 		return;
 	}
 
-	int rootX, rootY, winX, winY;
-	queryPositions(rootX, rootY, winX, winY);
-	move(rootX, rootY);
+	int winX = m_x, winY = m_y;
 
 	// Also need new texture
 	if (!getTexture()) {
@@ -5306,6 +5285,9 @@ dispatch_x11( xwayland_ctx_t *ctx )
 					bShouldResetCursor = true;
 				}
 				break;
+			case MotionNotify:
+				cursor->move(ev.xmotion.x_root, ev.xmotion.y_root);
+				break;
 			default:
 				if (ev.type == ctx->damage_event + XDamageNotify)
 				{
@@ -6255,7 +6237,7 @@ steamcompmgr_main(int argc, char **argv)
 		clock_gettime(CLOCK_MONOTONIC, &now);
 
 		if (global_focus.cursor)
-			global_focus.cursor->updatePosition();
+			global_focus.cursor->constrainPosition();
 
 		// Ask for a new surface every vblank
 		if ( vblank == true )
