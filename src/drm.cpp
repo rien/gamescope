@@ -2322,6 +2322,30 @@ inline float linear_to_srgb( float fVal )
     return ( fVal < 0.0031308f ) ? fVal * 12.92f : std::pow( fVal, 1.0f / 2.4f ) * 1.055f - 0.055f;
 }
 
+static float safe_pow(float x, float y)
+{
+	// Avoids pow(x, 1.0f) != x.
+	if (y == 1.0f)
+		return x;
+
+	return pow(x, y);
+}
+
+inline float pq_to_nits( float pq )
+{
+    const float c1 = 0.8359375f;
+    const float c2 = 18.8515625f;
+    const float c3 = 18.6875f;
+
+    const float oo_m1 = 1.0f / 0.1593017578125f;
+    const float oo_m2 = 1.0f / 78.84375f;
+
+    float num = std::max(std::pow(pq, oo_m2) - c1, 0.0f);
+    float den = c2 - c3 * safe_pow(pq, oo_m2);
+
+    return 10000.0f * safe_pow(num / den, oo_m1);
+}
+
 inline int quantize( float fVal, float fMaxVal )
 {
     return std::max( 0.f, std::min( fMaxVal, roundf( fVal * fMaxVal ) ) );
@@ -2497,6 +2521,8 @@ drm_screen_type drm_get_screen_type(struct drm_t *drm)
 	return drm_get_connector_type(drm->connector->connector);
 }
 
+bool g_bDisplayNativeHDRGamma22Test = false;
+
 inline float flerp( float a, float b, float t )
 {
     return a + t * (b - a);
@@ -2509,7 +2535,15 @@ inline uint16_t drm_quantize_lut_value( float flValue )
 
 inline uint16_t drm_calc_lut_value( float input, float flLinearGain, float flGain, float flBlend, drm_valve1_transfer_function regamma_tf )
 {
-    float flValue = flerp( flGain * input, linear_to_srgb( flLinearGain * srgb_to_linear( input ) ), flBlend );
+	float flValue = input;
+	if ( g_bDisplayNativeHDRGamma22Test )
+	{
+		flValue = safe_pow( std::clamp( pq_to_nits( input ) / 500.0f, 0.0f, 1.0f ), 1.0f / 2.2f );
+	}
+	else
+	{
+    	flValue = flerp( flGain * flValue, linear_to_srgb( flLinearGain * srgb_to_linear( flValue ) ), flBlend );
+	}
 	return drm_quantize_lut_value( flValue );
 }
 
@@ -2672,14 +2706,7 @@ bool drm_update_vrr_state(struct drm_t *drm)
 	return true;
 }
 
-static float safe_pow(float x, float y)
-{
-	// Avoids pow(x, 1.0f) != x.
-	if (y == 1.0f)
-		return x;
-
-	return pow(x, y);
-}
+bool g_bWasDisplayNativeHDRGamma22Test = false;
 
 bool drm_update_gamma_lut(struct drm_t *drm)
 {
@@ -2699,10 +2726,13 @@ bool drm_update_gamma_lut(struct drm_t *drm)
 		drm->pending.color_gamma_exponent[screen_type][1] == drm->current.color_gamma_exponent[screen_type][1] &&
 		drm->pending.color_gamma_exponent[screen_type][2] == drm->current.color_gamma_exponent[screen_type][2] &&
 		drm->pending.gain_blend == drm->current.gain_blend &&
-		drm->pending.screen_type == drm->current.screen_type )
+		drm->pending.screen_type == drm->current.screen_type &&
+		g_bDisplayNativeHDRGamma22Test == g_bWasDisplayNativeHDRGamma22Test )
 	{
 		return true;
 	}
+
+	g_bWasDisplayNativeHDRGamma22Test = g_bDisplayNativeHDRGamma22Test;
 
 	bool color_gain_identity = drm->pending.gain_blend == 1.0f ||
 		( drm->pending.color_gain[0] == 1.0f &&
@@ -2719,7 +2749,7 @@ bool drm_update_gamma_lut(struct drm_t *drm)
 		  drm->pending.color_gamma_exponent[screen_type][1] == 1.0f &&
 		  drm->pending.color_gamma_exponent[screen_type][2] == 1.0f );
 
-	if ( color_gain_identity && linear_gain_identity && gamma_exponent_identity )
+	if ( color_gain_identity && linear_gain_identity && gamma_exponent_identity && !g_bDisplayNativeHDRGamma22Test )
 	{
 		drm->pending.gamma_lut_id = 0;
 		return true;
