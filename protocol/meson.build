@@ -8,6 +8,7 @@ protocols = [
 	'gamescope-input-method',
 	'gamescope-tearing-control-unstable-v1',
 	'xdg-shell',
+	'drm-lease-v1',
 ]
 
 protocols_client_src = []
