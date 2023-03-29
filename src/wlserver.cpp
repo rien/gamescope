@@ -624,8 +624,9 @@ static void gamescope_xwayland_handle_set_hdr_metadata( struct wl_client *client
 {
 	struct wlr_surface *surface = wlr_surface_from_resource( surface_resource );
 	wlserver_wl_surface_info *wl_info = get_wl_surface_info( surface );
-	if ( BIsNested() )
+	if ( !BIsUsingDRM() )
 	{
+		// TODO(Josh): HANDLE IT WHEN WE START LEASING
 		wl_log.infof("Ignoring HDR metadata when nested.");
 		return;
 	}
@@ -851,7 +852,7 @@ bool wlsession_init( void ) {
 	};
 	wlserver_set_output_info( &output_info );
 
-	if ( BIsNested() )
+	if ( BIsNested() || BIsLeasing() )
 		return true;
 
 	wlserver.wlr.session = wlr_session_create( wlserver.display );
@@ -1086,7 +1087,7 @@ bool wlserver_init( void ) {
 
 	wl_signal_add( &wlserver.wlr.multi_backend->events.new_input, &new_input_listener );
 
-	if ( bIsDRM == True )
+	if ( bIsDRM == True && !BIsLeasing() )
 	{
 		wlserver.wlr.libinput_backend = wlr_libinput_backend_create( wlserver.display, wlserver.wlr.session );
 		if ( wlserver.wlr.libinput_backend == NULL)

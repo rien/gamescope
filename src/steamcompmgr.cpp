@@ -764,6 +764,27 @@ destroy_buffer( struct wl_listener *listener, void * )
 	wlr_buffer_map.erase( wlr_buffer_map.find( entry->buf ) );
 }
 
+void import_all_drm_buffers_and_commits()
+{
+	assert( BIsUsingDRM() );
+
+	std::lock_guard<std::mutex> lock( wlr_buffer_map_lock );
+
+	for (auto& map_entry : wlr_buffer_map)
+	{
+		auto& entry = map_entry.second;
+
+		struct wlr_dmabuf_attributes dmabuf = {0};
+		if ( wlr_buffer_get_dmabuf( entry.buf, &dmabuf ) )
+		{
+			entry.fb_id = drm_fbid_from_dmabuf( &g_DRM, entry.buf, &dmabuf );
+			drm_lock_fbid( &g_DRM, entry.fb_id );
+		}
+	}
+
+	// TODO: Reimport existing commits.
+}
+
 static std::shared_ptr<commit_t>
 import_commit ( struct wlr_buffer *buf, bool async, std::shared_ptr<wlserver_vk_swapchain_feedback> swapchain_feedback )
 {
@@ -815,7 +836,7 @@ import_commit ( struct wlr_buffer *buf, bool async, std::shared_ptr<wlserver_vk_
 	assert( commit->vulkanTex );
 
 	struct wlr_dmabuf_attributes dmabuf = {0};
-	if ( BIsNested() == false && wlr_buffer_get_dmabuf( buf, &dmabuf ) )
+	if ( BIsUsingDRM() && wlr_buffer_get_dmabuf( buf, &dmabuf ) )
 	{
 		commit->fb_id = drm_fbid_from_dmabuf( &g_DRM, buf, &dmabuf );
 
@@ -1297,7 +1318,7 @@ bool MouseCursor::getTexture()
 
 	uint32_t surfaceWidth;
 	uint32_t surfaceHeight;
-	if ( BIsNested() == false && alwaysComposite == false )
+	if ( BIsUsingDRM() && alwaysComposite == false )
 	{
 		surfaceWidth = g_DRM.cursor_width;
 		surfaceHeight = g_DRM.cursor_height;
@@ -1337,7 +1358,7 @@ bool MouseCursor::getTexture()
 	if ( !g_bForceRelativeMouse )
 	{
 		sdlwindow_grab( m_imageEmpty );
-		bSteamCompMgrGrab = BIsNested() && m_imageEmpty;
+		bSteamCompMgrGrab = !BIsUsingDRM() && m_imageEmpty;
 	}
 
 	m_dirty = false;
@@ -1349,7 +1370,7 @@ bool MouseCursor::getTexture()
 	}
 
 	CVulkanTexture::createFlags texCreateFlags;
-	if ( BIsNested() == false )
+	if ( BIsUsingDRM() )
 	{
 		texCreateFlags.bFlippable = true;
 		texCreateFlags.bLinear = true; // cursor buffer needs to be linear
@@ -1435,7 +1456,7 @@ void MouseCursor::paint(steamcompmgr_win_t *window, steamcompmgr_win_t *fit, str
 	layer->zpos = g_zposCursor; // cursor, on top of both bottom layers
 
 	layer->tex = m_texture;
-	layer->fbid = BIsNested() ? 0 : m_texture->fbid();
+	layer->fbid = BIsUsingDRM() ? m_texture->fbid() : 0;
 
 	layer->linearFilter = cursor_scale != 1.0f;
 	layer->blackBorder = false;
@@ -1895,7 +1916,7 @@ paint_all(bool async)
 		global_focus.cursor->undirty();
 	}
 
-	bool bForceHideCursor = BIsNested() && !BIsVRSession() && !bSteamCompMgrGrab;
+	bool bForceHideCursor = !BIsUsingDRM() && !BIsVRSession() && !bSteamCompMgrGrab;
 
 	bool bDrewCursor = false;
 
@@ -1909,7 +1930,7 @@ paint_all(bool async)
 		bDrewCursor = nLayerCountAfter > nLayerCountBefore;
 	}
 
-	if ( !bValidContents || ( BIsNested() == false && g_DRM.paused == true ) )
+	if ( !bValidContents || ( BIsUsingDRM() && g_DRM.paused == true ) )
 	{
 		return;
 	}
@@ -1968,13 +1989,13 @@ paint_all(bool async)
 	if ( g_nOutputRefresh == nTargetRefresh )
 		g_uDynamicRefreshEqualityTime = now;
 
-	if ( !BIsNested() && g_nOutputRefresh != nTargetRefresh && g_uDynamicRefreshEqualityTime + g_uDynamicRefreshDelay < now )
+	if ( BIsUsingDRM() && g_nOutputRefresh != nTargetRefresh && g_uDynamicRefreshEqualityTime + g_uDynamicRefreshDelay < now )
 		drm_set_refresh( &g_DRM, nTargetRefresh );
 
 	bool bNeedsNearest = g_upscaleFilter == GamescopeUpscaleFilter::NEAREST && frameInfo.layers[0].scale.x != 1.0f && frameInfo.layers[0].scale.y != 1.0f;
 
 
-	bool bNeedsComposite = BIsNested();
+	bool bNeedsComposite = !BIsUsingDRM();
 	bNeedsComposite |= alwaysComposite;
 	bNeedsComposite |= bCapture;
 	bNeedsComposite |= bWasFirstFrame;
@@ -1992,7 +2013,7 @@ paint_all(bool async)
 		frameInfo.useNISLayer0 = false;
 	}
 
-	if ( !BIsNested() && g_bOutputHDREnabled )
+	if ( BIsUsingDRM() && g_bOutputHDREnabled )
 	{
 		bNeedsComposite |= g_bHDRItmEnable;
 		if ( !drm_supports_hdr_planes(&g_DRM) )
@@ -2040,7 +2061,7 @@ paint_all(bool async)
 			return;
 		}
 
-		if ( BIsNested() == true )
+		if ( !BIsUsingDRM() )
 		{
 #if HAVE_OPENVR
 			if ( BIsVRSession() )
@@ -2216,7 +2237,7 @@ paint_all(bool async)
 	}
 	else
 	{
-		assert( BIsNested() == false );
+		assert( BIsUsingDRM() );
 
 		drm_commit( &g_DRM, &frameInfo );
 	}
@@ -4659,7 +4680,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 	}
 	if ( ev->atom == ctx->atoms.gamescopeDisplayForceInternal )
 	{
-		if ( !BIsNested() )
+		if ( BIsUsingDRM() )
 		{
 			g_DRM.force_internal = !!get_prop( ctx, ctx->root, ctx->atoms.gamescopeDisplayForceInternal, 0 );
 			g_DRM.out_of_date = 1;
@@ -4667,7 +4688,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 	}
 	if ( ev->atom == ctx->atoms.gamescopeDisplayModeNudge )
 	{
-		if ( !BIsNested() )
+		if ( BIsUsingDRM() )
 		{
 			g_DRM.out_of_date = 2;
 			XDeleteProperty( ctx->dpy, ctx->root, ctx->atoms.gamescopeDisplayModeNudge );
@@ -6121,7 +6142,7 @@ steamcompmgr_main(int argc, char **argv)
 	// Reset getopt() state
 	optind = 1;
 
-	bSteamCompMgrGrab = BIsNested() && g_bForceRelativeMouse;
+	bSteamCompMgrGrab = !BIsUsingDRM() && g_bForceRelativeMouse;
 
 	int o;
 	int opt_index = -1;
@@ -6343,6 +6364,32 @@ steamcompmgr_main(int argc, char **argv)
 			break;
 		}
 
+		extern int g_nLeaseTryFd;
+		if ( g_nLeaseTryFd > 0 )
+		{
+			int fd = g_nLeaseTryFd;
+			g_nLeaseTryFd = -1;
+
+			bool ret = init_drm( &g_DRM, fd, 0, 0, g_nNestedRefresh, false );
+			if ( !ret )
+				return;
+
+
+			wlserver_lock();
+			extern bool g_bLeasing;
+			g_bLeasing = true;
+			extern void vulkan_destroy_swapchain( void );
+			extern bool vulkan_make_output( void );
+			extern void import_all_drm_buffers_and_commits();
+			vulkan_destroy_swapchain();
+			ret = vulkan_make_output();
+			assert( ret );
+			wlserver_unlock();
+			// todo: handle no composition
+			//import_all_drm_buffers_and_commits();
+
+		}
+
 		if ( inputCounter != lastPublishedInputCounter )
 		{
 			XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeInputCounterAtom, XA_CARDINAL, 32, PropModeReplace,
@@ -6365,7 +6412,7 @@ steamcompmgr_main(int argc, char **argv)
 
 		// If our DRM state is out-of-date, refresh it. This might update
 		// the output size.
-		if ( BIsNested() == false )
+		if ( BIsUsingDRM() )
 		{
 			if ( drm_poll_state( &g_DRM ) )
 			{
@@ -6373,10 +6420,7 @@ steamcompmgr_main(int argc, char **argv)
 
 				update_mode_atoms(root_ctx);
 			}
-		}
 
-		if ( !BIsNested() )
-		{
 			auto connector_id = drm_get_connector_identifier( &g_DRM );
 			if ( g_LastConnectorIdentifier != connector_id )
 			{
@@ -6425,7 +6469,7 @@ steamcompmgr_main(int argc, char **argv)
 				wlserver_unlock();
 			}
 
-			if ( BIsNested() == true && BIsVRSession() == false )
+			if ( BIsNested() && !BIsVRSession() && !BIsUsingDRM() )
 			{
 				vulkan_remake_swapchain();
 

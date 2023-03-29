@@ -900,7 +900,7 @@ void load_pnps(void)
 	fclose(f);
 }
 
-bool init_drm(struct drm_t *drm, int width, int height, int refresh, bool wants_adaptive_sync)
+bool init_drm(struct drm_t *drm, int fd, int width, int height, int refresh, bool wants_adaptive_sync)
 {
 	load_pnps();
 
@@ -909,28 +909,36 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh, bool wants_
 	drm->preferred_height = height;
 	drm->preferred_refresh = refresh;
 
-	drm->device_name = nullptr;
-	dev_t dev_id = 0;
-	if (vulkan_primary_dev_id(&dev_id)) {
-		drmDevice *drm_dev = nullptr;
-		if (drmGetDeviceFromDevId(dev_id, 0, &drm_dev) != 0) {
-			drm_log.errorf("Failed to find DRM device with device ID %" PRIu64, (uint64_t)dev_id);
+	if (fd == -1)
+	{
+		drm->device_name = nullptr;
+		dev_t dev_id = 0;
+		if (vulkan_primary_dev_id(&dev_id)) {
+			drmDevice *drm_dev = nullptr;
+			if (drmGetDeviceFromDevId(dev_id, 0, &drm_dev) != 0) {
+				drm_log.errorf("Failed to find DRM device with device ID %" PRIu64, (uint64_t)dev_id);
+				return false;
+			}
+			assert(drm_dev->available_nodes & (1 << DRM_NODE_PRIMARY));
+			drm->device_name = strdup(drm_dev->nodes[DRM_NODE_PRIMARY]);
+			drm_log.infof("opening DRM node '%s'", drm->device_name);
+		}
+		else
+		{
+			drm_log.infof("warning: picking an arbitrary DRM device");
+		}
+
+		drm->fd = wlsession_open_kms( drm->device_name );
+		if ( drm->fd < 0 )
+		{
+			drm_log.errorf("Could not open KMS device");
 			return false;
 		}
-		assert(drm_dev->available_nodes & (1 << DRM_NODE_PRIMARY));
-		drm->device_name = strdup(drm_dev->nodes[DRM_NODE_PRIMARY]);
-		drm_log.infof("opening DRM node '%s'", drm->device_name);
 	}
 	else
 	{
-		drm_log.infof("warning: picking an arbitrary DRM device");
-	}
-
-	drm->fd = wlsession_open_kms( drm->device_name );
-	if ( drm->fd < 0 )
-	{
-		drm_log.errorf("Could not open KMS device");
-		return false;
+		drm->device_name = drmGetDeviceNameFromFd2(fd);
+		drm->fd = fd;
 	}
 
 	if (drmSetClientCap(drm->fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
@@ -1087,7 +1095,10 @@ void finish_drm(struct drm_t *drm)
 	drmModeAtomicReq *req = drmModeAtomicAlloc();
 	for ( auto &kv : drm->connectors ) {
 		struct connector *conn = &kv.second;
-		add_connector_property(req, conn, "CRTC_ID", 0);
+
+		if ( !BIsLeasing() )
+			add_connector_property(req, conn, "CRTC_ID", 0);
+
 		if (conn->has_colorspace)
 			add_connector_property(req, conn, "Colorspace", 0);
 		// HACK HACK: Setting to 0 doesn't disable HDR properly.
@@ -1101,7 +1112,11 @@ void finish_drm(struct drm_t *drm)
 			add_connector_property(req, conn, "content type", 0);
 	}
 	for ( size_t i = 0; i < drm->crtcs.size(); i++ ) {
-		add_crtc_property(req, &drm->crtcs[i], "MODE_ID", 0);
+		if ( !BIsLeasing() )
+		{
+			add_crtc_property(req, &drm->crtcs[i], "MODE_ID", 0);
+			add_crtc_property(req, &drm->crtcs[i], "ACTIVE", 0);
+		}
 		if ( drm->crtcs[i].has_gamma_lut )
 			add_crtc_property(req, &drm->crtcs[i], "GAMMA_LUT", 0);
 		if ( drm->crtcs[i].has_degamma_lut )
@@ -1116,7 +1131,6 @@ void finish_drm(struct drm_t *drm)
 			add_crtc_property(req, &drm->crtcs[i], "VRR_ENABLED", 0);
 		if ( drm->crtcs[i].has_valve1_regamma_tf )
 			add_crtc_property(req, &drm->crtcs[i], "VALVE1_CRTC_REGAMMA_TF", 0);
-		add_crtc_property(req, &drm->crtcs[i], "ACTIVE", 0);
 	}
 	for ( size_t i = 0; i < drm->planes.size(); i++ ) {
 		struct plane *plane = &drm->planes[i];

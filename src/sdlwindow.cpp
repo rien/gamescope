@@ -247,6 +247,9 @@ void inputSDLThreadRun( void )
 						case KEY_S:
 							take_screenshot();
 							break;
+						case KEY_P:
+							try_drm_lease();
+							break;
 						case KEY_G:
 							g_bGrabbed = !g_bGrabbed;
 							SDL_SetWindowKeyboardGrab( g_SDLWindow, g_bGrabbed ? SDL_TRUE : SDL_FALSE );

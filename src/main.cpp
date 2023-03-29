@@ -24,6 +24,7 @@
 #include "sdlwindow.hpp"
 #include "wlserver.hpp"
 #include "gpuvis_trace_utils.h"
+#include "lease.hpp"
 
 #if HAVE_OPENVR
 #include "vr_session.hpp"
@@ -38,6 +39,9 @@ static bool s_bInitialWantsVRREnabled = false;
 
 const char *gamescope_optstring = nullptr;
 const char *g_pOriginalDisplay = nullptr;
+const char *g_pOriginalWaylandDisplay = nullptr;
+
+static constexpr bool g_bLeaseImmediately = false;
 
 const struct option *gamescope_options = (struct option[]){
 	{ "help", no_argument, nullptr, 0 },
@@ -282,7 +286,20 @@ bool BIsVRSession( void )
 }
 #endif
 
-static bool initOutput(int preferredWidth, int preferredHeight, int preferredRefresh);
+bool g_bLeasing = false;
+int g_nLeaseTryFd = -1;
+
+bool BIsLeasing( void )
+{
+	return g_bLeasing;
+}
+
+void try_drm_lease()
+{
+	g_nLeaseTryFd = init_drm_lease();
+}
+
+static bool initOutput(int preferredWidth, int preferredHeight, int preferredRefresh, int lease_fd);
 static void steamCompMgrThreadRun(int argc, char **argv);
 
 static std::string build_optstring(const struct option *options)
@@ -590,7 +607,23 @@ int main(int argc, char **argv)
 	if ( getenv("DISPLAY") != NULL || getenv("WAYLAND_DISPLAY") != NULL )
 	{
 		g_bIsNested = true;
-		g_pOriginalDisplay = getenv("DISPLAY");
+		if ( getenv("DISPLAY") )
+			g_pOriginalDisplay = strdup( getenv("DISPLAY") );
+
+		if ( getenv("WAYLAND_DISPLAY") )
+			g_pOriginalWaylandDisplay = strdup( getenv( "WAYLAND_DISPLAY" ) );
+	}
+
+	int lease_fd = -1;
+	if ( g_bLeaseImmediately )
+	{
+		lease_fd = init_drm_lease();
+
+		if ( lease_fd > 0 )
+		{
+			g_bIsNested = false;
+			g_bLeasing = true;
+		}
 	}
 
 	if ( !wlsession_init() )
@@ -632,7 +665,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	if ( !initOutput( g_nPreferredOutputWidth, g_nPreferredOutputHeight, g_nNestedRefresh ) )
+	if ( !initOutput( g_nPreferredOutputWidth, g_nPreferredOutputHeight, g_nNestedRefresh, lease_fd ) )
 	{
 		fprintf( stderr, "Failed to initialize output\n" );
 		return 1;
@@ -750,7 +783,7 @@ static void steamCompMgrThreadRun(int argc, char **argv)
 	pthread_kill( g_mainThread, SIGINT );
 }
 
-static bool initOutput( int preferredWidth, int preferredHeight, int preferredRefresh )
+static bool initOutput( int preferredWidth, int preferredHeight, int preferredRefresh, int lease_fd )
 {
 	if ( g_bIsNested == true )
 	{
@@ -785,6 +818,6 @@ static bool initOutput( int preferredWidth, int preferredHeight, int preferredRe
 	}
 	else
 	{
-		return init_drm( &g_DRM, preferredWidth, preferredHeight, preferredRefresh, s_bInitialWantsVRREnabled );
+		return init_drm( &g_DRM, lease_fd, preferredWidth, preferredHeight, preferredRefresh, s_bInitialWantsVRREnabled );
 	}
 }

@@ -64,3 +64,12 @@ extern uint32_t g_preferDeviceID;
 void restore_fd_limit( void );
 bool BIsNested( void );
 bool BIsVRSession( void );
+
+bool BIsLeasing( void );
+
+inline bool BIsUsingDRM( void )
+{
+    return (!BIsNested() || BIsLeasing()) && !BIsVRSession();
+}
+
+void try_drm_lease();
