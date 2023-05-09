@@ -299,6 +299,7 @@ void inputSDLThreadRun( void )
 						SDL_GetWindowSizeInPixels( g_SDLWindow, &width, &height );
 #endif
 						g_nOutputWidth = width;
+							printf("g g_nOutputWidth: %d\n", g_nOutputWidth);
 						g_nOutputHeight = height;
 
 						updateOutputRefresh();
