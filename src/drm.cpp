@@ -2633,15 +2633,11 @@ static void drm_unset_mode( struct drm_t *drm )
 	drm->needs_modeset = true;
 
 	g_nOutputWidth = drm->preferred_width;
-	printf("a g_nOutputWidth: %d\n", g_nOutputWidth);
 	g_nOutputHeight = drm->preferred_height;
 	if (g_nOutputHeight == 0)
 		g_nOutputHeight = 720;
 	if (g_nOutputWidth == 0)
-	{
 		g_nOutputWidth = g_nOutputHeight * 16 / 9;
-			printf("b g_nOutputWidth: %d\n", g_nOutputWidth);
-	}
 
 	g_nOutputRefresh = drm->preferred_refresh;
 	if (g_nOutputRefresh == 0)
@@ -2675,14 +2671,12 @@ bool drm_set_mode( struct drm_t *drm, const drmModeModeInfo *mode )
 	case DRM_MODE_ROTATE_180:
 		g_bRotated = false;
 		g_nOutputWidth = mode->hdisplay;
-			printf("c g_nOutputWidth: %d\n", g_nOutputWidth);
 		g_nOutputHeight = mode->vdisplay;
 		break;
 	case DRM_MODE_ROTATE_90:
 	case DRM_MODE_ROTATE_270:
 		g_bRotated = true;
 		g_nOutputWidth = mode->vdisplay;
-			printf("d g_nOutputWidth: %d\n", g_nOutputWidth);
 		g_nOutputHeight = mode->hdisplay;
 		break;
 	}

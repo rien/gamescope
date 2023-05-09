@@ -774,7 +774,6 @@ static bool initOutput( int preferredWidth, int preferredHeight, int preferredRe
 	if ( g_bIsNested == true )
 	{
 		g_nOutputWidth = preferredWidth;
-			printf("e g_nOutputWidth: %d\n", g_nOutputWidth);
 		g_nOutputHeight = preferredHeight;
 		g_nOutputRefresh = preferredRefresh;
 
@@ -788,10 +787,7 @@ static bool initOutput( int preferredWidth, int preferredHeight, int preferredRe
 			g_nOutputHeight = 720;
 		}
 		if ( g_nOutputWidth == 0 )
-		{
 			g_nOutputWidth = g_nOutputHeight * 16 / 9;
-				printf("f g_nOutputWidth: %d\n", g_nOutputWidth);
-		}
 		if ( g_nOutputRefresh == 0 )
 			g_nOutputRefresh = 60;
 
