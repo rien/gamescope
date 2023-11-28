@@ -794,8 +794,8 @@ struct commit_t : public gamescope::IWaitable
 			pDoneCommits->listCommitsDone.push_back( CommitDoneEntry_t{ commitID, desired_present_time } );
 		}
 
-		if ( m_bMangoNudge )
-			mangoapp_update( frametime, uint64_t(~0ull), uint64_t(~0ull) );
+		//if ( m_bMangoNudge )
+		//	mangoapp_update( frametime, uint64_t(~0ull), uint64_t(~0ull) );
 
 		nudge_steamcompmgr();
 	}
@@ -893,6 +893,8 @@ bool			synchronize;
 std::mutex g_SteamCompMgrXWaylandServerMutex;
 
 VBlankTimeInfo_t g_SteamCompMgrVBlankTime = {};
+
+uint64_t g_uCurrentBasePlaneCommitID = 0;
 
 static int g_nSteamCompMgrTargetFPS = 0;
 static uint64_t g_uDynamicRefreshEqualityTime = 0;
@@ -2335,6 +2337,8 @@ paint_window(steamcompmgr_win_t *w, steamcompmgr_win_t *scaleW, struct FrameInfo
 		g_CachedPlanes[ HELD_COMMIT_BASE ] = basePlane;
 		if ( !(flags & PaintWindowFlag::FadeTarget) )
 			g_CachedPlanes[ HELD_COMMIT_FADE ] = basePlane;
+
+		g_uCurrentBasePlaneCommitID = lastCommit->commitID;
 	}
 }
 

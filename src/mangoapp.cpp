@@ -52,3 +52,16 @@ void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uin
     mangoapp_msg_v1.outputHeight = g_nOutputHeight;
     msgsnd(msgid, &mangoapp_msg_v1, sizeof(mangoapp_msg_v1) - sizeof(mangoapp_msg_v1.hdr.msg_type), IPC_NOWAIT);
 }
+
+extern uint64_t g_uCurrentBasePlaneCommitID;
+void mangoapp_output_update( uint64_t vblanktime )
+{
+	static uint64_t s_uLastBasePlaneCommitID = 0;
+	if ( s_uLastBasePlaneCommitID != g_uCurrentBasePlaneCommitID )
+	{
+		static uint64_t s_uLastBasePlaneUpdateVBlankTime = vblanktime - 16'666'666;
+		mangoapp_update( s_uLastBasePlaneUpdateVBlankTime - vblanktime, uint64_t(~0ull), uint64_t(~0ull) );
+		s_uLastBasePlaneCommitID = g_uCurrentBasePlaneCommitID;
+		s_uLastBasePlaneUpdateVBlankTime = vblanktime;
+	}
+}
