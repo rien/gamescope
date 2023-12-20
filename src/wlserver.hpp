@@ -59,19 +59,17 @@ public:
 	bool is_xwayland_ready() const;
 	const char *get_nested_display_name() const;
 
-	void set_wl_id( struct wlserver_x11_surface_info *surf, uint32_t id );
-
 	_XDisplay *get_xdisplay();
 
 	std::unique_ptr<xwayland_ctx_t> ctx;
 
 	void wayland_commit(struct wlr_surface *surf, struct wlr_buffer *buf);
 
-	std::vector<ResListEntry_t>& retrieve_commits();
-
 	void handle_override_window_content( struct wl_client *client, struct wl_resource *resource, struct wlr_surface *surface, uint32_t x11_window );
 	void destroy_content_override( struct wlserver_x11_surface_info *x11_surface, struct wlr_surface *surf);
 	void destroy_content_override(struct wlserver_content_override *co);
+
+	wlserver_content_override *GetContentOverride( uint32_t uXID );
 
 	struct wl_client *get_client();
 	struct wlr_output *get_output();
@@ -226,34 +224,6 @@ void wlserver_set_output_info( const wlserver_output_info *info );
 gamescope_xwayland_server_t *wlserver_get_xwayland_server( size_t index );
 const char *wlserver_get_wl_display_name( void );
 
-struct wlserver_wl_surface_info
-{
-	wlserver_x11_surface_info *x11_surface = nullptr;
-	wlserver_xdg_surface_info *xdg_surface = nullptr;
-
-
-	struct wlr_surface *wlr = nullptr;
-	struct wl_listener commit;
-	struct wl_listener destroy;
-
-	uint32_t presentation_hint = 0;
-
-	std::shared_ptr<wlserver_vk_swapchain_feedback> swapchain_feedback = {};
-
-	uint64_t sequence = 0;
-	std::vector<struct wl_resource*> pending_presentation_feedbacks;
-
-	std::atomic<struct wl_resource *> gamescope_swapchain = { nullptr };
-	std::optional<uint32_t> present_id = std::nullopt;
-	uint64_t desired_present_time = 0;
-
-	uint64_t last_refresh_cycle = 0;
-};
-wlserver_wl_surface_info *get_wl_surface_info(struct wlr_surface *wlr_surf);
-
-void wlserver_x11_surface_info_init( struct wlserver_x11_surface_info *surf, gamescope_xwayland_server_t *server, uint32_t x11_id );
-void wlserver_x11_surface_info_finish( struct wlserver_x11_surface_info *surf );
-
 void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int refresh );
 
 extern std::atomic<bool> g_bPendingTouchMovement;
@@ -263,10 +233,83 @@ void wlserver_open_steam_menu( bool qam );
 uint32_t wlserver_make_new_xwayland_server();
 void wlserver_destroy_xwayland_server(gamescope_xwayland_server_t *server);
 
-void wlserver_presentation_feedback_presented( struct wlr_surface *surface, std::vector<struct wl_resource*>& presentation_feedbacks, uint64_t last_refresh_nsec, uint64_t refresh_cycle );
-void wlserver_presentation_feedback_discard( struct wlr_surface *surface, std::vector<struct wl_resource*>& presentation_feedbacks );
+void wlserver_presentation_feedback_presented( struct wlr_surface *surface, std::vector<struct wl_resource*> presentation_feedbacks, uint64_t last_refresh_nsec, uint64_t refresh_cycle );
+void wlserver_presentation_feedback_discard( struct wlr_surface *surface, std::vector<struct wl_resource*> presentation_feedbacks );
 
 void wlserver_past_present_timing( struct wlr_surface *surface, uint32_t present_id, uint64_t desired_present_time, uint64_t actual_present_time, uint64_t earliest_present_time, uint64_t present_margin );
 void wlserver_refresh_cycle( struct wlr_surface *surface, uint64_t refresh_cycle );
 
 void wlserver_force_shutdown();
+
+struct wl_display;
+struct wlr_xwayland_server;
+
+namespace gamescope
+{
+	using WaylandResourceID = uint32_t;
+	using X11_XID = uint32_t;
+
+	class CGamescopeX11Surface;
+
+	class CGamescopeWaylandSurface
+	{
+	public:
+		CGamescopeWaylandSurface( wlr_surface *pSurface );
+		~CGamescopeWaylandSurface();
+
+		static CGamescopeWaylandSurface *Get( wlr_surface *pSurface );
+	private:
+		wlr_surface *m_pSurface = nullptr;
+		CGamescopeX11Surface *m_pX11Surface = nullptr;
+
+		std::atomic<wl_resource *> m_pGamescopeSwapchain = { nullptr };
+
+		// Surface state not contained by wlr/wlr addons, etc.
+		struct
+		{
+			uint32_t uPresentationHint = 0;
+
+			std::shared_ptr<wlserver_vk_swapchain_feedback> pSwapchainFeedback = {};
+
+			std::vector<wl_resource*> pPendingPresentationFeedbacks;
+			std::optional<uint32_t> uPresentId = std::nullopt;
+			uint64_t ulSequence = 0;
+			uint64_t ulDesiredPresentTime = 0;
+			uint64_t ulLastRefreshCycle = 0;
+		} m_SurfaceState;
+
+		wl_listener m_CommitListener;
+		wl_listener m_DestroyListener;
+	};
+
+	class CGamescopeXWaylandServer
+	{
+	public:
+		CGamescopeXWaylandServer( wl_display *pDisplay );
+		~CGamescopeXWaylandServer();
+
+		void UpdateOutputInfo();
+
+		CGamescopeX11Surface *GetPendingMainSurface( WaylandResourceID uResourceId ); // wl -> x11
+		wlr_surface *GetPendingOverrideSurface( X11_XID uXID ); // x11 -> wl
+
+		_XDisplay *GetXDisplay() const { return m_pX11Display; }
+		bool IsReady() const { return m_bXWaylandReady; } // Not thread safe. Only relevant to wlserver thread.
+	private:
+		wl_display *m_pWaylandDisplay = nullptr;
+		wlr_xwayland_server *m_pXWaylandServer = nullptr;
+		wlr_output *m_pOutput = nullptr;
+
+		bool m_bXWaylandReady = false;
+		_XDisplay *m_pX11Display = nullptr;
+
+		std::mutex m_PendingMainSurfacesMutex;
+		std::unordered_map<WaylandResourceID, CGamescopeX11Surface*> m_pPendingMainSurfaces;
+
+		std::mutex m_PendingOverrideSurfacesMutex;
+		std::unordered_map<X11_XID, wlr_surface*> m_pPendingOverrideSurfaces;
+
+		wl_listener m_ReadyListener;
+	};
+
+}

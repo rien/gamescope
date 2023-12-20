@@ -3,6 +3,7 @@
 #include "xwayland_ctx.hpp"
 #include <variant>
 
+struct wlr_surface;
 struct commit_t;
 struct wlserver_vk_swapchain_feedback;
 
@@ -33,6 +34,51 @@ struct wlserver_x11_surface_info
 
 	gamescope_xwayland_server_t *xwayland_server;
 };
+
+namespace gamescope
+{
+	class CGamescopeWaylandSurface;
+
+	class CGamescopeX11Surface
+	{
+		CGamescopeX11Surface( gamescope_xwayland_server_t *pServer, uint32_t uXID, uint64_t ulWindowSeq );
+		~CGamescopeX11Surface();
+
+		void LinkMainSurfaceByWaylandID( uint32_t uWaylandID );
+
+		void LinkMainSurface( wlr_surface *pSurface );
+		void LinkOverrideSurface( wlr_surface *pSurface );
+
+		void UnlinkMainSurface();
+		void UnlinkOverrideSurface();
+
+		wlr_surface *OverrideSurface() const { return m_pOverrideSurface; }
+		wlr_surface *MainSurface() const { return m_pMainSurface; }
+
+		wlr_surface *CurrentSurface() const
+		{
+			return m_pOverrideSurface ? m_pOverrideSurface : m_pMainSurface;
+		}
+
+	private:
+		void ProcessPendingCommits( wlr_surface *pSurface );
+
+		void UpdateContentOverrides();
+
+		void RemoveFromPendingWlSurfaceList();
+		void AddToPendingWlSurfaceList( uint32_t uWaylandID );
+
+		gamescope_xwayland_server_t *m_pXWaylandServer = nullptr;
+
+		std::atomic<wlr_surface *> m_pMainSurface = { nullptr };
+		std::atomic<wlr_surface *> m_pOverrideSurface = { nullptr };
+		uint32_t m_uPendingMainWaylandSurfaceID = 0;
+
+		uint32_t m_uX11WindowXID = 0;
+
+		uint64_t m_ulGamescopeWindowSequence = 0;
+	};
+}
 
 struct wlserver_xdg_surface_info
 {

@@ -58,6 +58,8 @@ extern "C" {
 #include "pipewire.hpp"
 #endif
 
+#include "lockable.h"
+
 #include "gpuvis_trace_utils.h"
 
 #include <algorithm>
@@ -70,37 +72,23 @@ struct wlserver_t wlserver = {
 	.touch_down_ids = {}
 };
 
-struct wlserver_content_override {
-	gamescope_xwayland_server_t *server;
-	struct wlr_surface *surface;
-	uint32_t x11_window;
-	struct wl_listener surface_destroy_listener;
-};
-
 enum wlserver_touch_click_mode g_nDefaultTouchClickMode = WLSERVER_TOUCH_CLICK_LEFT;
 enum wlserver_touch_click_mode g_nTouchClickMode = g_nDefaultTouchClickMode;
 
 
 std::mutex g_wlserver_xdg_shell_windows_lock;
 
-static struct wl_list pending_surfaces = {0};
+CLocked<> PendingSurfaces()
+{
+	static std::unordered_map<uint32_t, CGamescopeX11Surface*> s_Map;
+	static std::mutex s_MapMutex;
+	return CLocked<std::unordered_map<uint32_t, CGamescopeX11Surface*>>{ std::unique_lock{ s_MapMutex }, s_Map };
+}
+
 
 static void wlserver_x11_surface_info_set_wlr( struct wlserver_x11_surface_info *surf, struct wlr_surface *wlr_surf, bool override );
 wlserver_wl_surface_info *get_wl_surface_info(struct wlr_surface *wlr_surf);
 static enum gamescope_commit_queue_v1_queue_mode gamescope_commit_queue_v1_get_surface_mode(struct wlr_surface *surface);
-
-std::vector<ResListEntry_t>& gamescope_xwayland_server_t::retrieve_commits()
-{
-	static std::vector<ResListEntry_t> commits;
-	commits.clear();
-	commits.reserve(16);
-
-	{
-		std::lock_guard<std::mutex> lock( wayland_commit_lock );
-		commits.swap(wayland_commit_queue);
-	}
-	return commits;
-}
 
 void gamescope_xwayland_server_t::wayland_commit(struct wlr_surface *surf, struct wlr_buffer *buf)
 {
@@ -137,7 +125,12 @@ struct PendingCommit_t
 	struct wlr_buffer *buf;
 };
 
-std::list<PendingCommit_t> g_PendingCommits;
+static CLocked<std::list<PendingCommit_t>> PendingCommitList()
+{
+	static std::list<PendingCommit_t> s_PendingCommits;
+	static std::mutex s_ListMutex;
+	return CLocked<std::list<PendingCommit_t>>{ std::unique_lock{ s_ListMutex }, s_PendingCommits };
+}
 
 void wlserver_xdg_commit(struct wlr_surface *surf, struct wlr_buffer *buf)
 {
@@ -190,7 +183,7 @@ void xwayland_surface_commit(struct wlr_surface *wlr_surface) {
 	}
 	else
 	{
-		g_PendingCommits.push_back(PendingCommit_t{ wlr_surface, buf });
+		PendingCommitList()->push_back(PendingCommit_t{ wlr_surface, buf });
 	}
 }
 
@@ -456,79 +449,14 @@ static void handle_wl_surface_commit( struct wl_listener *l, void *data )
 	xwayland_surface_commit(surf->wlr);
 }
 
-static void handle_wl_surface_destroy( struct wl_listener *l, void *data )
+static struct wl_listener new_surface_listener =
 {
-	wlserver_wl_surface_info *surf = wl_container_of( l, surf, destroy );
-	if (surf->x11_surface)
+	.notify = [](struct wl_listener *pListener, void *pData)
 	{
-		wlserver_x11_surface_info *x11_surface = surf->x11_surface;
-
-		x11_surface->xwayland_server->destroy_content_override( x11_surface, surf->wlr );
-
-		wlserver_x11_surface_info_finish(x11_surface);
-		// Re-init it so it can be destroyed for good on the x11 side.
-		// This just clears it out from the main wl surface mainly.
-		//
-		// wl_list_remove leaves stuff in a weird state, so we need to call
-		// this to re-init the list to avoid a crash.
-		wlserver_x11_surface_info_init(x11_surface, x11_surface->xwayland_server, x11_surface->x11_id);
+		wlr_surface *pSurface = reinterpret_cast<wlr_surface *>( pData );
+		pSurface->data = new CGamescopeWaylandSurface( pSurface );
 	}
-
-	if ( surf->wlr == wlserver.mouse_focus_surface )
-		wlserver.mouse_focus_surface = nullptr;
-
-	if ( surf->wlr == wlserver.kb_focus_surface )
-		wlserver.kb_focus_surface = nullptr;
-
-	for (auto it = g_PendingCommits.begin(); it != g_PendingCommits.end();)
-	{
-		if (it->surf == surf->wlr)
-		{
-			// We owned the buffer lock, so unlock it here.
-			wlr_buffer_unlock(it->buf);
-			it = g_PendingCommits.erase(it);
-		}
-		else
-		{
-			it++;
-		}
-	}
-
-	for (auto& feedback : surf->pending_presentation_feedbacks)
-		wp_presentation_feedback_send_discarded(feedback);
-	surf->pending_presentation_feedbacks.clear();
-
-	surf->wlr->data = nullptr;
-	delete surf;
-}
-
-static void wlserver_new_surface(struct wl_listener *l, void *data)
-{
-	struct wlr_surface *wlr_surf = (struct wlr_surface *)data;
-	uint32_t id = wl_resource_get_id(wlr_surf->resource);
-
-	wlserver_wl_surface_info *wl_surface_info = new wlserver_wl_surface_info;
-	wl_surface_info->wlr = wlr_surf;
-
-	wl_surface_info->destroy.notify = handle_wl_surface_destroy;
-	wl_signal_add( &wlr_surf->events.destroy, &wl_surface_info->destroy );
-
-	wl_surface_info->commit.notify = handle_wl_surface_commit;
-	wl_signal_add( &wlr_surf->events.commit, &wl_surface_info->commit );
-
-	wlr_surf->data = wl_surface_info;
-
-	struct wlserver_x11_surface_info *s, *tmp;
-	wl_list_for_each_safe(s, tmp, &pending_surfaces, pending_link)
-	{
-		if (s->wl_id == id && s->main_surface == nullptr)
-		{
-			wlserver_x11_surface_info_set_wlr( s, wlr_surf, false );
-		}
-	}
-}
-
-static struct wl_listener new_surface_listener = { .notify = wlserver_new_surface };
+};
 
 void gamescope_xwayland_server_t::destroy_content_override( struct wlserver_content_override *co )
 {
@@ -547,6 +475,14 @@ void gamescope_xwayland_server_t::destroy_content_override( struct wlserver_x11_
 		destroy_content_override(iter->second);
 }
 
+
+wlserver_content_override *gamescope_xwayland_server_t::GetContentOverride( uint32_t uXID )
+{
+	if ( !content_overrides.count( uXID ) )
+		return nullptr;
+
+	return &content_overrides[ uXID ];
+}
 
 static void content_override_handle_surface_destroy( struct wl_listener *listener, void *data )
 {
@@ -1396,73 +1332,6 @@ int wlsession_open_kms( const char *device_name ) {
 	return device->fd;
 }
 
-gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display)
-{
-	struct wlr_xwayland_server_options xwayland_options = {
-		.lazy = false,
-		.enable_wm = false,
-		.no_touch_pointer_emulation = true,
-		.force_xrandr_emulation = true,
-	};
-	xwayland_server = wlr_xwayland_server_create(display, &xwayland_options);
-	wl_signal_add(&xwayland_server->events.ready, &xwayland_ready_listener);
-
-	output = wlr_headless_add_output(wlserver.wlr.headless_backend, 1280, 720);
-	output->make = strdup("gamescope");  // freed by wlroots
-	output->model = strdup("gamescope"); // freed by wlroots
-	wlr_output_set_name(output, "gamescope");
-
-	int refresh = g_nNestedRefresh;
-	if (refresh == 0) {
-		refresh = g_nOutputRefresh;
-	}
-
-	wlr_output_enable(output, true);
-	wlr_output_set_custom_mode(output, g_nNestedWidth, g_nNestedHeight, refresh * 1000);
-	if (!wlr_output_commit(output))
-	{
-		wl_log.errorf("Failed to commit headless output");
-		abort();
-	}
-
-	update_output_info();
-
-	wlr_output_create_global(output);
-}
-
-gamescope_xwayland_server_t::~gamescope_xwayland_server_t()
-{
-	/* Clear content overrides */
-	for (auto& co : content_overrides)
-	{
-		wl_list_remove( &co.second->surface_destroy_listener.link );
-		free( co.second );
-	}
-	content_overrides.clear();
-
-	wlr_xwayland_server_destroy(xwayland_server);
-	xwayland_server = nullptr;
-
-	wlr_output_destroy(output);
-}
-
-void gamescope_xwayland_server_t::update_output_info()
-{
-	const auto *info = &wlserver.output_info;
-
-	output->phys_width = info->phys_width;
-	output->phys_height = info->phys_height;
-	struct wl_resource *resource;
-	wl_resource_for_each(resource, &output->resources) {
-		wl_output_send_geometry(resource, 0, 0,
-			output->phys_width, output->phys_height, output->subpixel,
-			output->make, output->model, output->transform);
-	}
-	wlr_output_schedule_done(output);
-
-	wlr_output_set_description(output, info->description);
-}
-
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	struct wlserver_xdg_surface_info* info =
 		wl_container_of(listener, info, map);
@@ -1571,8 +1440,6 @@ bool wlserver_init( void ) {
 	assert( wlserver.display != nullptr );
 
 	bool bIsDRM = !BIsNested();
-
-	wl_list_init(&pending_surfaces);
 
 	wlserver.event_loop = wl_display_get_event_loop(wlserver.display);
 
@@ -2149,125 +2016,6 @@ const char *wlserver_get_wl_display_name( void )
 	return wlserver.wl_display_name;
 }
 
-static void wlserver_x11_surface_info_set_wlr( struct wlserver_x11_surface_info *surf, struct wlr_surface *wlr_surf, bool override )
-{
-	assert( wlserver_is_lock_held() );
-
-	if (!override)
-	{
-		wl_list_remove( &surf->pending_link );
-		wl_list_init( &surf->pending_link );
-	}
-
-	wlserver_wl_surface_info *wl_surf_info = get_wl_surface_info(wlr_surf);
-	if (override)
-	{
-		if ( surf->override_surface )
-		{
-			wlserver_wl_surface_info *wl_info = get_wl_surface_info(surf->override_surface);
-			if (wl_info)
-				wl_info->x11_surface = nullptr;
-		}
-
-		surf->override_surface = wlr_surf;
-	}
-	else
-	{
-		if ( surf->main_surface )
-		{
-			wlserver_wl_surface_info *wl_info = get_wl_surface_info(surf->main_surface);
-			if (wl_info)
-				wl_info->x11_surface = nullptr;
-		}
-
-		surf->main_surface = wlr_surf;
-	}
-	wl_surf_info->x11_surface = surf;
-
-	for (auto it = g_PendingCommits.begin(); it != g_PendingCommits.end();)
-	{
-		if (it->surf == wlr_surf)
-		{
-			PendingCommit_t pending = *it;
-
-			// Still have the buffer lock from before...
-			wlserver_x11_surface_info *wlserver_x11_surface_info = get_wl_surface_info(wlr_surf)->x11_surface;
-			assert(wlserver_x11_surface_info);
-			assert(wlserver_x11_surface_info->xwayland_server);
-			wlserver_x11_surface_info->xwayland_server->wayland_commit( pending.surf, pending.buf );
-
-			it = g_PendingCommits.erase(it);
-		}
-		else
-		{
-			it++;
-		}
-	}
-}
-
-void wlserver_x11_surface_info_init( struct wlserver_x11_surface_info *surf, gamescope_xwayland_server_t *server, uint32_t x11_id )
-{
-	surf->wl_id = 0;
-	surf->x11_id = x11_id;
-	surf->main_surface = nullptr;
-	surf->override_surface = nullptr;
-	surf->xwayland_server = server;
-	wl_list_init( &surf->pending_link );
-}
-
-void gamescope_xwayland_server_t::set_wl_id( struct wlserver_x11_surface_info *surf, uint32_t id )
-{
-	if (surf->wl_id)
-	{
-		if (surf->main_surface)
-		{
-			struct wl_resource *old_resource = wl_client_get_object( xwayland_server->client, surf->wl_id );
-			if (!old_resource)
-			{
-				wl_log.errorf("wlserver_x11_surface_info had bad wl_id? Oh no! %d", surf->wl_id);
-				return;
-			}
-			wlr_surface *old_wlr_surf = wlr_surface_from_resource( old_resource );
-			if (!old_wlr_surf)
-			{
-				wl_log.errorf("wlserver_x11_surface_info wl_id's was not a wlr_surf?! Oh no! %d", surf->wl_id);
-				return;
-			}
-
-			wlserver_wl_surface_info *old_surface_info = get_wl_surface_info(old_wlr_surf);
-			old_surface_info->x11_surface = nullptr;
-		}
-		else
-		{
-			wl_list_remove( &surf->pending_link );
-			wl_list_init( &surf->pending_link );
-		}
-	}
-
-	surf->wl_id = id;
-	surf->main_surface = nullptr;
-	surf->xwayland_server = this;
-
-	wl_list_insert( &pending_surfaces, &surf->pending_link );
-
-	struct wlr_surface *wlr_override_surf = nullptr;
-	struct wlr_surface *wlr_surf = nullptr;
-	if ( content_overrides.count( surf->x11_id ) )
-	{
-		wlr_override_surf = content_overrides[ surf->x11_id ]->surface;
-	}
-
-	struct wl_resource *resource = wl_client_get_object( xwayland_server->client, id );
-	if ( resource != nullptr )
-		wlr_surf = wlr_surface_from_resource( resource );
-
-	if ( wlr_surf != nullptr )
-		wlserver_x11_surface_info_set_wlr( surf, wlr_surf, false );
-
-	if ( wlr_override_surf != nullptr )
-		wlserver_x11_surface_info_set_wlr( surf, wlr_override_surf, true );
-}
-
 bool gamescope_xwayland_server_t::is_xwayland_ready() const
 {
 	return xwayland_ready;
@@ -2281,30 +2029,6 @@ _XDisplay *gamescope_xwayland_server_t::get_xdisplay()
 const char *gamescope_xwayland_server_t::get_nested_display_name() const
 {
 	return xwayland_server->display_name;
-}
-
-void wlserver_x11_surface_info_finish( struct wlserver_x11_surface_info *surf )
-{
-	assert( wlserver_is_lock_held() );
-
-	if (surf->main_surface)
-	{
-		wlserver_wl_surface_info *wl_info = get_wl_surface_info(surf->main_surface);
-		if (wl_info)
-			wl_info->x11_surface = nullptr;
-	}
-
-	if (surf->override_surface)
-	{
-		wlserver_wl_surface_info *wl_info = get_wl_surface_info(surf->override_surface);
-		if (wl_info)
-			wl_info->x11_surface = nullptr;
-	}
-
-	surf->wl_id = 0;
-	surf->main_surface = nullptr;
-	surf->override_surface = nullptr;
-	wl_list_remove( &surf->pending_link );
 }
 
 void wlserver_set_xwayland_server_mode( size_t idx, int w, int h, int refresh )
@@ -2380,3 +2104,278 @@ void wlserver_destroy_xwayland_server(gamescope_xwayland_server_t *server)
 
 	std::erase_if(wlserver.wlr.xwayland_servers, [=](const auto& other) { return other.get() == server; });
 }
+
+
+
+namespace gamescope
+{
+	////////////////////////////////////
+	// CGamescopeX11Surface
+	//
+	// This part lives inside the Window
+	// on the X11/SteamCompMgr side.
+	/////////////////////////////////////
+
+	CGamescopeX11Surface::CGamescopeX11Surface( gamescope_xwayland_server_t *pServer, uint32_t uXID, uint64_t ulWindowSeq )
+		: m_pXWaylandServer{ pServer }
+		, m_uX11WindowXID{ uXID }
+		, m_ulGamescopeWindowSequence{ ulWindowSeq }
+	{
+	}
+
+	CGamescopeX11Surface::~CGamescopeX11Surface()
+	{
+		UnlinkMainSurface();
+		UnlinkOverrideSurface();
+		RemoveFromPendingWlSurfaceList();
+	}
+
+	void CGamescopeX11Surface::LinkMainSurfaceByWaylandID( uint32_t uWaylandID )
+	{
+		UnlinkMainSurface();
+		RemoveFromPendingWlSurfaceList();
+
+		wl_resource *pResource = wl_client_get_object( m_pXWaylandServer->client, uWaylandID );
+		if ( pResource )
+			LinkMainSurface( wlr_surface_from_resource( pResource ) );
+		else
+			AddToPendingWlSurfaceList( uWaylandID );
+	}
+
+	void CGamescopeX11Surface::LinkMainSurface( wlr_surface *pSurface )
+	{
+		UnlinkMainSurface();
+		RemoveFromPendingWlSurfaceList();
+
+		m_pMainSurface = pSurface;
+		if ( wlserver_wl_surface_info *pMainWaylandInfo = CGamescopeWaylandSurface::Get( m_pMainSurface ) )
+			pMainWaylandInfo->x11_surface = this;
+		ProcessPendingCommits( pSurface );
+	}
+	void CGamescopeX11Surface::LinkOverrideSurface( wlr_surface *pSurface )
+	{
+		UnlinkOverrideSurface();
+
+		m_pOverrideSurface = pSurface;
+		m_uOverrideWaylandSurfaceID = wl_resource_get_id( pSurface->resource );
+		if ( wlserver_wl_surface_info *pOverrideWaylandInfo = CGamescopeWaylandSurface::Get( m_pOverrideSurface ) )
+			pOverrideWaylandInfo->x11_surface = this;
+		ProcessPendingCommits( pSurface );
+	}
+
+	void CGamescopeX11Surface::UnlinkMainSurface()
+	{
+		if ( wlserver_wl_surface_info *pMainWaylandInfo = CGamescopeWaylandSurface::Get( m_pMainSurface ) )
+			pMainWaylandInfo->x11_surface = nullptr;
+
+		m_pMainSurface = nullptr;
+	}
+	void CGamescopeX11Surface::UnlinkOverrideSurface()
+	{
+		if ( wlserver_wl_surface_info *pOverrideWaylandInfo = CGamescopeWaylandSurface::Get( m_pOverrideSurface ) )
+			pOverrideWaylandInfo->x11_surface = nullptr;
+
+		m_pOverrideSurface = nullptr;
+	}
+
+	void CGamescopeX11Surface::ProcessPendingCommits( wlr_surface *pSurface )
+	{
+		if ( !m_pXWaylandServer )
+			return;
+
+		std::erase_if( *PendingCommitList(), [=]( PendingCommit_t& pendingCommit )
+		{
+			if ( commit.surf != pSurface )
+				return false;
+
+			m_pXWaylandServer->wayland_commit( pSurface, pendingCommit.buf );
+			return true;
+		});
+	}
+
+	void CGamescopeX11Surface::UpdateContentOverrides()
+	{
+		if ( !m_pXWaylandServer || !m_uX11WindowXID )
+			return;
+
+		wlr_surface *pSurface = m_pXWaylandServer->GetPendingOverrideSurface( m_uX11WindowXID );
+		if ( !pSurface )
+			return;
+
+		LinkOverrideSurface( pSurface );
+	}
+
+	void CGamescopeX11Surface::RemoveFromPendingWlSurfaceList()
+	{
+		if ( m_uMainWaylandSurfaceID )
+		{
+			PendingSurfaces()->erase( m_uMainWaylandSurfaceID );
+			m_uPendingMainWaylandSurfaceID = 0;
+		}
+	}
+
+	void CGamescopeX11Surface::AddToPendingWlSurfaceList( uint32_t uWaylandID )
+	{
+		m_uPendingMainWaylandSurfaceID = uWaylandID;
+		// If the X11 side of things is processed before the
+		// Wayland surface side is created etc, we need to
+		// mark ourselves as needing a surface so we can
+		// automatically associate ourselves when created.
+		PendingSurfaces()->insert( m_uPendingMainWaylandSurfaceID, this );
+	}
+
+	////////////////////////////////////
+	// CGamescopeWaylandSurface
+	//
+	// This part lives on the wl_surface's
+	// userdata on wlserver's thread
+	/////////////////////////////////////
+
+	CGamescopeWaylandSurface::CGamescopeWaylandSurface( wlr_surface *pSurface )
+		: m_pSurface{ pSurface }
+	{
+		m_DestroyListener.notify = []( wl_listener *pListener, void *pData )
+		{
+			CGamescopeWaylandSurface *pWaylandSurface = wl_container_of( pListener, pWaylandSurface, m_DestroyListener );
+			delete pWaylandSurface;
+		};
+		wl_signal_add( &pSurface->events.destroy, &m_DestroyListener );
+
+		m_CommitListener.notify = []( wl_listener *pListener, void *pData )
+		{
+			CGamescopeWaylandSurface *pWaylandSurface = wl_container_of( pListener, pWaylandSurface, m_CommitListener );
+			xwayland_surface_commit( pWaylandSurface->m_pSurface );
+		};
+		wl_signal_add( &pSurface->events.commit, &m_CommitListener );
+
+		auto pendingSurfaces = PendingSurfaces();
+		auto it = pendingSurfaces->find( wl_resource_get_id( pSurface->resource ) );
+		if ( it != pendingSurfaces->end() )
+		{
+			// This will remove it from PendingSurfaces.
+			it->second->LinkMainSurface( pSurface );
+		}
+	}
+
+	CGamescopeWaylandSurface::~CGamescopeWaylandSurface()
+	{
+		delete m_pX11Surface;
+		m_pX11Surface = nullptr;
+
+		if ( wlserver.mouse_focus_surface == m_pSurface )
+			wlserver.mouse_focus_surface = nullptr;
+
+		if ( wlserver.kb_focus_surface == m_pSurface )
+			wlserver.kb_focus_surface = nullptr;
+
+		std::erase_if( *PendingCommitList(), [=]( PendingCommit_t& pendingCommit )
+		{
+			if ( commit.surf != m_pSurface )
+				return false;
+
+			wlr_buffer_unlock( commit.buf );
+			return true;
+		});
+
+		for ( auto& feedback : m_SurfaceState.pPendingPresentationFeedbacks )
+			wp_presentation_feedback_send_discarded( feedback );
+	}
+
+	/*static*/ CGamescopeWaylandSurface *CGamescopeWaylandSurface::Get( wlr_surface *pSurface )
+	{
+		return reinterpret_cast<CGamescopeWaylandSurface *>( pSurface->data );
+	}
+
+	//////////////////////////////
+	// CGamescopeXWaylandServer
+	//////////////////////////////
+
+	CGamescopeXWaylandServer::CGamescopeXWaylandServer( wl_display *pDisplay )
+		: m_pWaylandDisplay{ pDisplay }
+	{
+		wlr_xwayland_server_options options =
+		{
+			.lazy = false,
+			.enable_wm = false,
+			.no_touch_pointer_emulation = true,
+			.force_xrandr_emulation = true,
+		};
+		m_pXWaylandServer = wlr_xwayland_server_create( m_pWaylandDisplay, &options );
+
+		m_ReadyListener.notify = []( wl_listener *pListener, void *pData )
+		{
+			CGamescopeXWaylandServer *pXWaylandServer = wl_container_of( pListener, pXWaylandServer, m_ReadyListener );
+			pXWaylandServer->m_bXWaylandReady = true;
+		};
+		wl_signal_add( &xwayland_server->events.ready, &m_ReadyListener );
+
+		m_pOutput = wlr_headless_add_output( wlserver.wlr.headless_backend, 1280, 720 );
+		m_pOutput->make = strdup( "gamescope" ); // Freed by wlroots.
+		m_pOutput->model = strdup( "gamescope" ); // Freed by wlroots.
+		wlr_output_set_name( m_pOutput, "gamescope" );
+		wlr_output_enable( m_pOutput, true );
+		wlr_output_set_custom_mode( m_pOutput, g_nNestedWidth, g_nNestedHeight, g_VBlankTimer.GetRefresh() * 1000 s);
+		if ( !wlr_output_commit( m_pOutput ) )
+		{
+			wl_log.errorf( "Failed to commit headless output" );
+			abort();
+		}
+		UpdateOutputInfo();
+
+		wlr_output_create_global( m_pOutput );
+	}
+
+	CGamescopeXWaylandServer::~CGamescopeXWaylandServer()
+	{
+		wlr_xwayland_server_destroy( m_pXWaylandServer );
+		wlr_output_destroy( m_pOutput );
+	}
+
+	void CGamescopeXWaylandServer::UpdateOutputInfo()
+	{
+		const auto *pInfo = &wlserver.output_info;
+
+		m_pOutput->phys_width = info->phys_width;
+		m_pOutput->phys_height = info->phys_height;
+
+		wl_resource *pResource;
+		wl_resource_for_each(pResource, &m_pOutput->resources)
+		{
+			wl_output_send_geometry( pResource, 0, 0,
+				m_pOutput->phys_width, m_pOutput->phys_height, m_pOutput->subpixel,
+				m_pOutput->make, m_pOutput->model, m_pOutput->transform );
+		}
+		wlr_output_schedule_done( m_pOutput );
+
+		wlr_output_set_description( m_pOutput, pInfo->description );
+	}
+
+	CGamescopeX11Surface *CGamescopeXWaylandServer::GetPendingMainSurface( WaylandResourceID uResourceId )
+	{
+		std::unique_lock lock{ m_PendingMainSurfacesMutex };
+
+		auto iter = m_pPendingMainSurfaces.find( uResourceId );
+		if ( iter == m_pPendingMainSurfaces.end() )
+			return nullptr;
+
+		CGamescopeX11Surface *pSurface = iter->second;
+		m_pPendingMainSurfaces.erase( iter );
+		return pSurface;
+	}
+
+	wlr_surface *CGamescopeXWaylandServer::GetPendingOverrideSurface( X11_XID uXID )
+	{
+		std::unique_lock lock{ m_PendingOverrideSurfacesMutex };
+
+		auto iter = m_pPendingOverrideSurfaces.find( uXID );
+		if ( iter == m_pPendingOverrideSurfaces.end() )
+			return nullptr;
+
+		wlr_surface *pSurface = iter->second;
+		m_pPendingOverrideSurfaces.erase( iter );
+		return pSurface;
+	}
+
+}
+
+
