@@ -31,6 +31,7 @@ protocols = [
 	'gamescope-control.xml',
 	'gamescope-swapchain.xml',
 	'gamescope-commit-queue-v1.xml',
+	'gamescope-xtest.xml'
 ]
 
 protocols_client_src = []

@@ -89,3 +89,5 @@ endif
 if get_option('enable_gamescope')
   subdir('src')
 endif
+
+subdir('xtest_shim')

@@ -35,6 +35,7 @@
 #include "wlr_end.hpp"
 
 #include "gamescope-xwayland-protocol.h"
+#include "gamescope-xtest-protocol.h"
 #include "gamescope-pipewire-protocol.h"
 #include "gamescope-control-protocol.h"
 #include "gamescope-swapchain-protocol.h"
@@ -972,6 +973,35 @@ static void create_gamescope_control( void )
 
 //
 
+static void gamescope_xtest_relative_motion( struct wl_client *client, struct wl_resource *resource, wl_fixed_t dx, wl_fixed_t dy )
+{
+	wlserver_mousemotion( wl_fixed_to_double( dx ), wl_fixed_to_double( dy ), get_time_in_milliseconds() );
+}
+
+static void gamescope_xtest_handle_destroy( struct wl_client *client, struct wl_resource *resource )
+{
+	wl_resource_destroy( resource );
+}
+
+static const struct gamescope_xtest_interface gamescope_xtest_impl = {
+	.destroy = gamescope_xtest_handle_destroy,
+	.relative_motion = gamescope_xtest_relative_motion,
+};
+
+static void gamescope_xtest_bind( struct wl_client *client, void *data, uint32_t version, uint32_t id )
+{
+	struct wl_resource *resource = wl_resource_create( client, &gamescope_xtest_interface, version, id );
+	wl_resource_set_implementation( resource, &gamescope_xtest_impl, NULL, [](struct wl_resource *resource) { });
+}
+
+static void create_gamescope_xtest( void )
+{
+	uint32_t version = 1;
+	wl_global_create( wlserver.display, &gamescope_xtest_interface, version, NULL, gamescope_xtest_bind );
+}
+
+//
+
 static void gamescope_surface_tearing_set_presentation_hint( struct wl_client *client, struct wl_resource *resource, uint32_t hint )
 {
 	wlserver_wl_surface_info *wl_surface_info = (wlserver_wl_surface_info *)wl_resource_get_user_data( resource );
@@ -1683,6 +1713,8 @@ bool wlserver_init( void ) {
 #endif
 
 	create_gamescope_control();
+
+	create_gamescope_xtest();
 
 	create_gamescope_tearing();
 

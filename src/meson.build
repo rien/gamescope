@@ -167,7 +167,6 @@ endforeach
     cpp_args: gamescope_cpp_args,
   )
 
-
 benchmark_dep = dependency('benchmark', required: get_option('benchmark'), disabler: true)
 executable('gamescope_color_microbench', ['color_bench.cpp', 'color_helpers.cpp'], dependencies:[benchmark_dep, glm_dep])
 
