@@ -27,6 +27,7 @@
 #include <frog-color-management-v1-client-protocol.h>
 #include <pointer-constraints-unstable-v1-client-protocol.h>
 #include <relative-pointer-unstable-v1-client-protocol.h>
+#include <alpha-modifier-v1-client-protocol.h>
 #include "wlr_end.hpp"
 
 #include "drm_include.h"
@@ -122,16 +123,17 @@ namespace gamescope
 
     struct WaylandPlaneState
     {
-        wl_buffer *pBuffer;
-        int32_t nDestX;
-        int32_t nDestY;
-        double flSrcX;
-        double flSrcY;
-        double flSrcWidth;
-        double flSrcHeight;
-        int32_t nDstWidth;
-        int32_t nDstHeight;
-        GamescopeAppTextureColorspace eColorspace;
+        wl_buffer *pBuffer = nullptr;
+        int32_t nDestX     = 0;
+        int32_t nDestY     = 0;
+        double flSrcX      = 0;
+        double flSrcY      = 0;
+        double flSrcWidth  = 0.0;
+        double flSrcHeight = 0.0;
+        int32_t nDstWidth  = 0;
+        int32_t nDstHeight = 0;
+        float flAlpha      = 1.0f;
+        GamescopeAppTextureColorspace eColorspace = GAMESCOPE_APP_TEXTURE_COLORSPACE_PASSTHRU;
     };
 
     inline WaylandPlaneState ClipPlane( const WaylandPlaneState &state )
@@ -204,6 +206,7 @@ namespace gamescope
         libdecor_frame *m_pFrame = nullptr;
         wl_subsurface *m_pSubsurface = nullptr;
         frog_color_managed_surface *m_pFrogColorManagedSurface = nullptr;
+        wp_alpha_modifier_surface_v1 *m_pAlphaModifierSurface = nullptr;
         libdecor_window_state m_eWindowState = LIBDECOR_WINDOW_STATE_NONE;
         bool m_bNeedsDecorCommit = false;
 
@@ -469,6 +472,7 @@ namespace gamescope
         wp_viewporter *GetViewporter() const { return m_pViewporter; }
         wp_presentation *GetPresentation() const { return m_pPresentation; }
         frog_color_management_factory_v1 *GetFrogColorManagementFactory() const { return m_pFrogColorMgmtFactory; }
+        wp_alpha_modifier_v1 *GetAlphaModifier() const { return m_pAlphaModifier; }
         libdecor *GetLibDecor() const { return m_pLibDecor; }
 
         uint32_t ImportWlBuffer( wl_buffer *pBuffer );
@@ -518,6 +522,7 @@ namespace gamescope
         frog_color_management_factory_v1 *m_pFrogColorMgmtFactory = nullptr;
         zwp_pointer_constraints_v1 *m_pPointerConstraints = nullptr;
         zwp_relative_pointer_manager_v1 *m_pRelativePointerManager = nullptr;
+        wp_alpha_modifier_v1 *m_pAlphaModifier = nullptr;
 
         std::unordered_map<wl_output *, WaylandOutputInfo> m_pOutputs;
 
@@ -683,6 +688,11 @@ namespace gamescope
                 frog_color_managed_surface_add_listener( m_pFrogColorManagedSurface, &s_FrogColorManagedSurfaceListener, this );
         }
 
+        if ( m_pBackend->GetAlphaModifier() )
+        {
+            m_pAlphaModifierSurface = wp_alpha_modifier_v1_get_surface( m_pBackend->GetAlphaModifier(), m_pSurface );
+        }
+
         if ( !pParent )
         {
             m_pFrame = libdecor_decorate( m_pBackend->GetLibDecor(), m_pSurface, &s_LibDecorFrameInterface, this );
@@ -749,6 +759,9 @@ namespace gamescope
                 }
             }
 
+            if ( m_pAlphaModifierSurface )
+                wp_alpha_modifier_surface_v1_set_multiplier( m_pAlphaModifierSurface, uint32_t( round( double( oState->flAlpha ) * UINT32_MAX ) ) );
+
             wp_viewport_set_source(
                 m_pViewport,
                 wl_fixed_from_double( oState->flSrcX ),
@@ -809,6 +822,7 @@ namespace gamescope
                     .flSrcHeight = double( pLayer->tex->height() ),
                     .nDstWidth   = int32_t( pLayer->tex->width() / double( pLayer->scale.x ) ),
                     .nDstHeight  = int32_t( pLayer->tex->height() / double( pLayer->scale.y ) ),
+                    .flAlpha     = pLayer->opacity,
                     .eColorspace = pLayer->colorspace,
                 } ) );
         }
@@ -1133,7 +1147,6 @@ namespace gamescope
                             .flSrcHeight = 1.0,
                             .nDstWidth   = int32_t( g_nOutputWidth ),
                             .nDstHeight  = int32_t( g_nOutputHeight ),
-                            .eColorspace = GAMESCOPE_APP_TEXTURE_COLORSPACE_PASSTHRU,
                         } );
                 }
 
@@ -1608,6 +1621,10 @@ namespace gamescope
         else if ( !strcmp( pInterface, wl_shm_interface.name ) )
         {
             m_pShm = (wl_shm *)wl_registry_bind( pRegistry, uName, &wl_shm_interface, 1u );
+        }
+        else if ( !strcmp( pInterface, wp_alpha_modifier_v1_interface.name ) )
+        {
+            m_pAlphaModifier = (wp_alpha_modifier_v1 *)wl_registry_bind( pRegistry, uName, &wp_alpha_modifier_v1_interface, 1u );
         }
     }
 
