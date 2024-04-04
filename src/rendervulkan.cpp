@@ -218,11 +218,11 @@ struct {
 	{ DRM_FORMAT_INVALID, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, false, true },
 };
 
-uint32_t VulkanFormatToDRM( VkFormat vkFormat )
+uint32_t VulkanFormatToDRM( VkFormat vkFormat, bool bHasAlpha )
 {
 	for ( int i = 0; s_DRMVKFormatTable[i].vkFormat != VK_FORMAT_UNDEFINED; i++ )
 	{
-		if ( s_DRMVKFormatTable[i].vkFormat == vkFormat || s_DRMVKFormatTable[i].vkFormatSrgb == vkFormat )
+		if ( ( s_DRMVKFormatTable[i].vkFormat == vkFormat || s_DRMVKFormatTable[i].vkFormatSrgb == vkFormat ) && s_DRMVKFormatTable[i].bHasAlpha == bHasAlpha )
 		{
 			return s_DRMVKFormatTable[i].DRMFormat;
 		}
@@ -2362,15 +2362,15 @@ bool CVulkanTexture::BInit( uint32_t width, uint32_t height, uint32_t depth, uin
 	return true;
 }
 
-bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t height, VkFormat format )
+bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t height, uint32_t drmFormat )
 {
-	m_drmFormat = VulkanFormatToDRM( format );
+	m_drmFormat = drmFormat;
 	m_vkImage = image;
 	m_vkImageMemory = VK_NULL_HANDLE;
 	m_width = width;
 	m_height = height;
 	m_depth = 1;
-	m_format = format;
+	m_format = DRMFormatToVulkan( drmFormat, false );
 	m_contentWidth = width;
 	m_contentHeight = height;
 	m_bOutputImage = true;
@@ -2379,7 +2379,7 @@ bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t
 		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 		.image = image,
 		.viewType = VK_IMAGE_VIEW_TYPE_2D,
-		.format = ToLinearVulkanFormat( format ),
+		.format = ToLinearVulkanFormat( m_format ),
 		.components = {
 			.r = VK_COMPONENT_SWIZZLE_IDENTITY,
 			.g = VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -2405,7 +2405,7 @@ bool CVulkanTexture::BInitFromSwapchain( VkImage image, uint32_t width, uint32_t
 	};
 
 	createInfo.pNext = &viewUsageInfo;
-	createInfo.format = ToSrgbVulkanFormat( format );
+	createInfo.format = ToSrgbVulkanFormat( m_format );
 
 	res = g_device.vk.CreateImageView(g_device.device(), &createInfo, nullptr, &m_linearView);
 	if ( res != VK_SUCCESS ) {
@@ -2950,12 +2950,13 @@ bool vulkan_make_swapchain( VulkanOutput_t *pOutput )
 	if ( surfaceFormat == formatCount )
 		return false;
 
-	pOutput->outputFormat = pOutput->surfaceFormats[ surfaceFormat ].format;
+	VkFormat format = pOutput->surfaceFormats[ surfaceFormat ].format;
+	pOutput->outputFormat = VulkanFormatToDRM( format, true );
 	
 	VkFormat formats[2] =
 	{
-		ToSrgbVulkanFormat( pOutput->outputFormat ),
-		ToLinearVulkanFormat( pOutput->outputFormat ),
+		ToSrgbVulkanFormat( format ),
+		ToLinearVulkanFormat( format ),
 	};
 
 	VkImageFormatListCreateInfo usageListInfo = {
@@ -2972,7 +2973,7 @@ bool vulkan_make_swapchain( VulkanOutput_t *pOutput )
 		.flags = formats[0] != formats[1] ? VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR : (VkSwapchainCreateFlagBitsKHR )0,
 		.surface = pOutput->surface,
 		.minImageCount = imageCount,
-		.imageFormat = pOutput->outputFormat,
+		.imageFormat = format,
 		.imageColorSpace = pOutput->surfaceFormats[surfaceFormat].colorSpace,
 		.imageExtent = {
 			.width = g_nOutputWidth,
@@ -3058,7 +3059,7 @@ static bool vulkan_make_output_images( VulkanOutput_t *pOutput )
 	pOutput->outputImagesPartialOverlay[1] = nullptr;
 	pOutput->outputImagesPartialOverlay[2] = nullptr;
 
-	VkFormat format = pOutput->outputFormat;
+	uint32_t drmFormat = pOutput->outputFormat;
 
 	pOutput->outputImages[0] = new CVulkanTexture();
 	bool bSuccess = pOutput->outputImages[0]->BInit( g_nOutputWidth, g_nOutputHeight, 1u, VulkanFormatToDRM(format), outputImageflags );
@@ -3089,7 +3090,7 @@ static bool vulkan_make_output_images( VulkanOutput_t *pOutput )
 
 	if ( pOutput->outputFormatOverlay != VK_FORMAT_UNDEFINED && !kDisablePartialComposition )
 	{
-		VkFormat partialFormat = pOutput->outputFormatOverlay;
+		uint32_t partialDrmFormat = pOutput->outputFormatOverlay;
 
 		pOutput->outputImagesPartialOverlay[0] = new CVulkanTexture();
 		bool bSuccess = pOutput->outputImagesPartialOverlay[0]->BInit( g_nOutputWidth, g_nOutputHeight, 1u, VulkanFormatToDRM(partialFormat), outputImageflags, nullptr, 0, 0, pOutput->outputImages[0].get() );

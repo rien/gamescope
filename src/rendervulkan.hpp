@@ -505,8 +505,8 @@ struct VulkanOutput_t
 	std::vector<gamescope::OwningRc<CVulkanTexture>> outputImagesPartialOverlay;
 	gamescope::OwningRc<CVulkanTexture> temporaryHackyBlankImage;
 
-	VkFormat outputFormat = VK_FORMAT_UNDEFINED;
-	VkFormat outputFormatOverlay = VK_FORMAT_UNDEFINED;
+	uint32_t outputFormat = DRM_FORMAT_INVALID;
+	uint32_t outputFormatOverlay = DRM_FORMAT_INVALID;
 
 	std::array<gamescope::OwningRc<CVulkanTexture>, 2> pScreenshotImages;
 
@@ -919,7 +919,7 @@ private:
 	uint32_t m_renderBufferOffset = 0;
 };
 
-uint32_t VulkanFormatToDRM( VkFormat vkFormat );
+uint32_t VulkanFormatToDRM( VkFormat vkFormat, bool bHasAlpha );
 VkFormat DRMFormatToVulkan( uint32_t nDRMFormat, bool bSrgb );
 bool DRMFormatHasAlpha( uint32_t nDRMFormat );
 uint32_t DRMFormatGetBPP( uint32_t nDRMFormat );
