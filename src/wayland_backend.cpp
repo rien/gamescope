@@ -60,10 +60,10 @@ auto CallWithAllButLast(Func pFunc, Args&&... args)
 }
 
 #define WAYLAND_NULL() []<typename... Args> ( void *pData, Args... args ) { }
-#define WAYLAND_USERDATA_TO_THIS(type, name) []<typename... Args> ( void *pData, Args... args ) { type *pThing = (type *)pData; pThing->name( std::forward<Args>(args)... ); }
+#define WAYLAND_USERDATA_TO_THIS(type, name) []<typename... Args> ( void *pData, Args... args ) { type *pThing = (type *)pData; if ( !pThing ) return; pThing->name( std::forward<Args>(args)... ); }
 
 // Libdecor puts its userdata ptr at the end... how fun! I shouldn't have spent so long writing this total atrocity to mankind.
-#define LIBDECOR_USERDATA_TO_THIS(type, name) []<typename... Args> ( Args... args ) { type *pThing = (type *)std::get<sizeof...(Args)-1>(std::forward_as_tuple(args...)); CallWithAllButLast([&]<typename... Args2>(Args2... args2){ pThing->name(std::forward<Args2>(args2)...); }, std::forward<Args>(args)...); }
+#define LIBDECOR_USERDATA_TO_THIS(type, name) []<typename... Args> ( Args... args ) { type *pThing = (type *)std::get<sizeof...(Args)-1>(std::forward_as_tuple(args...)); if ( !pThing ) return; CallWithAllButLast([&]<typename... Args2>(Args2... args2){ pThing->name(std::forward<Args2>(args2)...); }, std::forward<Args>(args)...); }
 
 extern gamescope::ConVar<bool> cv_hdr_enabled;
 
@@ -671,6 +671,8 @@ namespace gamescope
     CWaylandFb::~CWaylandFb()
     {
         // I own the pHostBuffer.
+        assert( m_pHostBuffer );
+        wl_buffer_set_user_data( m_pHostBuffer, nullptr );
         wl_buffer_destroy( m_pHostBuffer );
         m_pHostBuffer = nullptr;
     }
