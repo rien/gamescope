@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cassert>
 
+#include <thread>
+
 #include <poll.h>
 #include <unistd.h>
 #include <signal.h>
@@ -566,6 +568,14 @@ int main(int argc, char *argv[])
  
     data.reneg = pw_loop_add_event(pw_main_loop_get_loop(data.loop), reneg_format, &data);
  
+    void PulseFudging();
+    std::thread s_PulseFudgeThread{ []()
+    {
+        sleep(5);
+        PulseFudging();
+    } };
+    s_PulseFudgeThread.detach();
+
     /* do things until we quit the mainloop */
     pw_main_loop_run(data.loop);
  
@@ -577,4 +587,148 @@ int main(int argc, char *argv[])
     pw_deinit();
  
     return 0;
+}
+
+#include <pulse/pulseaudio.h>
+
+void StateCallback( pa_context *pContext, void *pUserData );
+void StreamReadCallback( pa_stream *pStream, size_t nLength, void *pUserData );
+void StreamStateCallback( pa_stream *pStream, void *pUserData );
+void StartRecording( pa_context *m_pContext );
+void OnThink( pa_mainloop *m_pMainLoop );
+
+void PulseFudging()
+{
+    pa_mainloop *m_pMainLoop = pa_mainloop_new();
+    assert( m_pMainLoop );
+
+    pa_mainloop_api *m_pMainLoopAPI = pa_mainloop_get_api( m_pMainLoop );
+    assert( m_pMainLoopAPI );
+
+    pa_context *m_pContext = pa_context_new( m_pMainLoopAPI, "Steam" );
+    assert( m_pContext );
+
+    pa_context_set_state_callback( m_pContext, StateCallback, nullptr );
+
+    pa_context_connect( m_pContext, NULL, PA_CONTEXT_NOFLAGS, NULL );
+
+    while ( true )
+    {
+        OnThink( m_pMainLoop );
+    }
+}
+
+void OnThink( pa_mainloop *m_pMainLoop )
+{
+	if ( m_pMainLoop )
+	{
+		int nDispatched;
+		do
+		{
+			int bBlock = 0;
+			nDispatched = pa_mainloop_iterate( m_pMainLoop, bBlock, NULL );
+		}
+		while ( nDispatched > 0 );
+	}
+}
+
+void StartRecording( pa_context *m_pContext )
+{
+    const char *m_sDevice = "alsa_output.pci-0000_04_00.5-platform-nau8821-max.HiFi__hw_sofnau8821max_1__sink.monitor";
+
+    pa_sample_spec m_SampleSpec;
+    m_SampleSpec.format = PA_SAMPLE_S16LE;
+	m_SampleSpec.rate = 48000;
+	m_SampleSpec.channels = 2;
+
+    pa_stream *m_pStream = pa_stream_new( m_pContext, "steam", &m_SampleSpec, NULL );//&m_ChannelMap );
+
+	pa_stream_set_state_callback( m_pStream, StreamStateCallback, nullptr );
+	pa_stream_set_read_callback( m_pStream, StreamReadCallback, nullptr );
+
+	pa_stream_flags_t nFlags = PA_STREAM_NOFLAGS;
+	pa_buffer_attr BufferAttr;
+	memset( &BufferAttr, 0, sizeof( BufferAttr ) );
+	BufferAttr.maxlength = (uint32_t) -1;
+	BufferAttr.prebuf = (uint32_t) -1;
+	BufferAttr.minreq = (uint32_t) -1;
+
+	// Set up to record data every 10 ms
+	const int LATENCY_MS = 10;
+	BufferAttr.fragsize = BufferAttr.tlength = pa_usec_to_bytes( LATENCY_MS * PA_USEC_PER_MSEC, &m_SampleSpec );
+	nFlags = static_cast<pa_stream_flags_t>( nFlags | PA_STREAM_ADJUST_LATENCY );
+
+	if ( pa_stream_connect_record( m_pStream, m_sDevice, &BufferAttr, nFlags ) < 0 )
+	{
+		fprintf( stderr, "StreamPulse: pa_stream_connect_record() failed: %s\n", pa_strerror( pa_context_errno( m_pContext ) ) );
+		return;
+	}
+}
+
+void StateCallback( pa_context *pContext, void *pUserData )
+{
+	switch ( pa_context_get_state( pContext ) )
+	{
+	case PA_CONTEXT_UNCONNECTED:
+	case PA_CONTEXT_CONNECTING:
+	case PA_CONTEXT_AUTHORIZING:
+	case PA_CONTEXT_SETTING_NAME:
+	default:
+		break;
+	case PA_CONTEXT_FAILED:
+		fprintf( stderr, "Context connection failed\n" );
+		break;
+	case PA_CONTEXT_TERMINATED:
+		fprintf( stderr, "Context connection terminated\n" );
+		break;
+	case PA_CONTEXT_READY:
+        StartRecording( pContext );
+		break;
+	}
+}
+
+void StreamStateCallback( pa_stream *pStream, void *pUserData )
+{
+	switch ( pa_stream_get_state( pStream ) )
+	{
+		case PA_STREAM_CREATING:
+		case PA_STREAM_TERMINATED:
+			break;
+
+		case PA_STREAM_READY:
+			{
+				char cmt[PA_CHANNEL_MAP_SNPRINT_MAX], sst[PA_SAMPLE_SPEC_SNPRINT_MAX];
+
+				fprintf( stderr, "StreamPulse: Connected to device %s (%u, %ssuspended).\n",
+						pa_stream_get_device_name( pStream ),
+						pa_stream_get_device_index( pStream ),
+						pa_stream_is_suspended( pStream ) ? "" : "not ");
+
+				fprintf( stderr, "StreamPulse: Using sample spec '%s', channel map '%s'.\n",
+						pa_sample_spec_snprint( sst, sizeof( sst ), pa_stream_get_sample_spec( pStream ) ),
+						pa_channel_map_snprint( cmt, sizeof( cmt ), pa_stream_get_channel_map( pStream ) ) );
+			}
+			break;
+
+		case PA_STREAM_FAILED:
+		default:
+			fprintf( stderr, "StreamPulse: Stream failed: %s", pa_strerror( pa_context_errno( pa_stream_get_context( pStream ) ) ) );
+			break;
+	}
+}
+
+void StreamReadCallback( pa_stream *pStream, size_t nLength, void *pUserData )
+{
+	while ( pa_stream_readable_size( pStream ) > 0 )
+	{
+		const void *pData;
+		if ( pa_stream_peek( pStream, &pData, &nLength ) < 0 )
+		{
+			fprintf( stderr, "StreamPulse: Error reading from stream\n" );
+			return;
+		}
+
+        (void) pData; // Don't actually care.
+		pa_stream_drop( pStream );
+	}
 }

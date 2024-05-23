@@ -172,7 +172,8 @@ endforeach
   )
 
 if pipewire_dep.found()
-  executable( 'gamescopestream', 'gamescopestream.cpp', protocols_client_src, dependencies: [ pipewire_dep, dep_wayland, libdecor_dep ], install: true )
+  pa_dep = dependency('libpulse')
+  executable( 'gamescopestream', 'gamescopestream.cpp', protocols_client_src, dependencies: [ pipewire_dep, pa_dep, dep_wayland, libdecor_dep ], install: true )
 endif
 
 benchmark_dep = dependency('benchmark', required: get_option('benchmark'), disabler: true)
